@@ -17,6 +17,7 @@ if not wlroots.found()
 endif
 
 wayland_server = dependency('wayland-server')
+wayland_client = dependency('wayland-client')
 wayland_protos = dependency('wayland-protocols')
 xkbcommon = dependency('xkbcommon')
 pixman = dependency('pixman-1')
@@ -46,6 +47,34 @@ xdg_shell_protocol_h = custom_target(
   input: xdg_shell_xml,
   output: 'xdg-shell-protocol.h',
   command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
+)
+
+fractional_scale_xml = wayland_protocols_dir / 'staging/fractional-scale/fractional-scale-v1.xml'
+fractional_scale_client_h = custom_target(
+  'fractional-scale-v1-client-protocol.h',
+  input: fractional_scale_xml,
+  output: 'fractional-scale-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+fractional_scale_client_c = custom_target(
+  'fractional-scale-v1-protocol.c',
+  input: fractional_scale_xml,
+  output: 'fractional-scale-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
+viewporter_xml = wayland_protocols_dir / 'stable/viewporter/viewporter.xml'
+viewporter_client_h = custom_target(
+  'viewporter-client-protocol.h',
+  input: viewporter_xml,
+  output: 'viewporter-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+viewporter_client_c = custom_target(
+  'viewporter-protocol.c',
+  input: viewporter_xml,
+  output: 'viewporter-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
 
 # Generate wlr-layer-shell protocol header
@@ -90,11 +119,16 @@ add_project_arguments(
 executable('infinidesk',
   infinidesk_sources,
   xdg_shell_protocol_h,
+  fractional_scale_client_h,
+  fractional_scale_client_c,
+  viewporter_client_h,
+  viewporter_client_c,
   wlr_layer_shell_protocol_h,
   include_directories: infinidesk_inc,
   dependencies: [
     wlroots,
     wayland_server,
+    wayland_client,
     xkbcommon,
     pixman,
     cairo,

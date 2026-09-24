@@ -17,6 +17,11 @@
 /* Forward declaration */
 struct infinidesk_server;
 struct wlr_texture;
+struct wl_registry;
+struct wp_fractional_scale_manager_v1;
+struct wp_fractional_scale_v1;
+struct wp_viewporter;
+struct wp_viewport;
 
 /* Number of layer shell layers (background, bottom, top, overlay) */
 #define LAYER_SHELL_LAYER_COUNT 4
@@ -47,6 +52,16 @@ struct infinidesk_output {
     int canvas_status_width;
     int canvas_status_height;
     float canvas_status_output_scale;
+
+    /* Parent Wayland surface scaling (nested backend only). */
+    struct wl_registry *nested_registry;
+    struct wp_fractional_scale_manager_v1 *nested_scale_manager;
+    struct wp_fractional_scale_v1 *nested_fractional_scale;
+    struct wp_viewporter *nested_viewporter;
+    struct wp_viewport *nested_viewport;
+    float nested_host_scale;
+    int nested_logical_width;
+    int nested_logical_height;
 
     struct wl_listener frame;
     struct wl_listener request_state;

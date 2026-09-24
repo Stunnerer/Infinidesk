@@ -17,6 +17,7 @@
 #include <cairo.h>
 #include <drm_fourcc.h>
 #include <pango/pangocairo.h>
+#include <wayland-client.h>
 #include <wlr/backend/wayland.h>
 #include <wlr/render/pass.h>
 #include <wlr/render/wlr_renderer.h>
@@ -35,6 +36,8 @@
 #include "infinidesk/server.h"
 #include "infinidesk/switcher.h"
 #include "infinidesk/view.h"
+#include "fractional-scale-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
 
 /* Background colour */
 static const float bg_colour[4] = {0.18f, 0.18f, 0.18f, 1.0f};
@@ -51,6 +54,113 @@ static void send_layer_frame_done(struct infinidesk_output *output,
 static void render_canvas_status(struct infinidesk_output *output,
                                  struct wlr_render_pass *pass, int width,
                                  int height);
+
+static bool output_set_nested_mode(struct infinidesk_output *output, int width,
+                                   int height) {
+    float scale = output->nested_host_scale;
+    if (!output->nested_viewport || scale <= 0.0f || width <= 0 ||
+        height <= 0) {
+        return false;
+    }
+
+    int buffer_width = (int)lround((double)width * scale);
+    int buffer_height = (int)lround((double)height * scale);
+    if (buffer_width <= 0 || buffer_height <= 0) {
+        return false;
+    }
+
+    struct wlr_output_state state;
+    wlr_output_state_init(&state);
+    wlr_output_state_set_custom_mode(&state, buffer_width, buffer_height, 0);
+    wlr_output_state_set_scale(&state, output->server->output_scale * scale);
+    bool committed = wlr_output_commit_state(output->wlr_output, &state);
+    wlr_output_state_finish(&state);
+    if (!committed) {
+        wlr_log(WLR_ERROR, "Failed to set nested output mode %dx%d", buffer_width,
+                buffer_height);
+        return false;
+    }
+
+    output->nested_logical_width = width;
+    output->nested_logical_height = height;
+    wp_viewport_set_destination(output->nested_viewport, width, height);
+    wlr_output_schedule_frame(output->wlr_output);
+    wlr_log(WLR_INFO, "Nested output: %dx%d logical, %dx%d buffer, %.2f scale",
+            width, height, buffer_width, buffer_height, scale);
+    return true;
+}
+
+static void nested_handle_preferred_scale(
+    void *data, struct wp_fractional_scale_v1 *fractional,
+    uint32_t numerator) {
+    (void)fractional;
+    struct infinidesk_output *output = data;
+    if (numerator == 0) {
+        return;
+    }
+    float scale = numerator / 120.0f;
+    if (scale == output->nested_host_scale) {
+        return;
+    }
+    float previous = output->nested_host_scale;
+    output->nested_host_scale = scale;
+    if (!output_set_nested_mode(output, output->nested_logical_width,
+                                output->nested_logical_height)) {
+        output->nested_host_scale = previous;
+    }
+}
+
+static const struct wp_fractional_scale_v1_listener nested_scale_listener = {
+    .preferred_scale = nested_handle_preferred_scale,
+};
+
+static void nested_handle_global(void *data, struct wl_registry *registry,
+                                 uint32_t name, const char *interface,
+                                 uint32_t version) {
+    (void)version;
+    struct infinidesk_output *output = data;
+    if (!output->nested_scale_manager &&
+        strcmp(interface, wp_fractional_scale_manager_v1_interface.name) == 0) {
+        output->nested_scale_manager = wl_registry_bind(
+            registry, name, &wp_fractional_scale_manager_v1_interface, 1);
+    } else if (!output->nested_viewporter &&
+               strcmp(interface, wp_viewporter_interface.name) == 0) {
+        output->nested_viewporter =
+            wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
+    }
+
+    if (output->nested_scale_manager && output->nested_viewporter &&
+        !output->nested_fractional_scale) {
+        struct wl_surface *surface =
+            wlr_wl_output_get_surface(output->wlr_output);
+        if (!output->nested_viewport) {
+            output->nested_viewport =
+                wp_viewporter_get_viewport(output->nested_viewporter, surface);
+        }
+        if (!output->nested_viewport) {
+            return;
+        }
+        output->nested_fractional_scale =
+            wp_fractional_scale_manager_v1_get_fractional_scale(
+                output->nested_scale_manager, surface);
+        if (output->nested_fractional_scale) {
+            wp_fractional_scale_v1_add_listener(output->nested_fractional_scale,
+                                                &nested_scale_listener, output);
+        }
+    }
+}
+
+static void nested_handle_global_remove(void *data, struct wl_registry *registry,
+                                        uint32_t name) {
+    (void)data;
+    (void)registry;
+    (void)name;
+}
+
+static const struct wl_registry_listener nested_registry_listener = {
+    .global = nested_handle_global,
+    .global_remove = nested_handle_global_remove,
+};
 
 void output_init(struct infinidesk_server *server) {
     server->new_output.notify = handle_new_output;
@@ -74,6 +184,9 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 
     output->server = server;
     output->wlr_output = wlr_output;
+    output->nested_host_scale = 1.0f;
+    output->nested_logical_width = wlr_output->width;
+    output->nested_logical_height = wlr_output->height;
 
     /* Initialise layer surface lists */
     for (int i = 0; i < LAYER_SHELL_LAYER_COUNT; i++) {
@@ -153,6 +266,13 @@ void handle_new_output(struct wl_listener *listener, void *data) {
     if (wlr_output_is_wl(wlr_output)) {
         wlr_wl_output_set_title(wlr_output, "Infinidesk");
         wlr_wl_output_set_app_id(wlr_output, "infinidesk");
+        struct wl_display *remote =
+            wlr_wl_backend_get_remote_display(wlr_output->backend);
+        output->nested_registry = wl_display_get_registry(remote);
+        if (output->nested_registry) {
+            wl_registry_add_listener(output->nested_registry,
+                                     &nested_registry_listener, output);
+        }
         wlr_log(WLR_DEBUG, "Set nested Wayland window title/app_id");
     }
 
@@ -425,8 +545,30 @@ void output_handle_request_state(struct wl_listener *listener, void *data) {
     wlr_log(WLR_DEBUG, "Output %s requested state change",
             output->wlr_output->name);
 
+    /* The Wayland backend reports the parent window size in logical pixels. */
+    if (output->nested_fractional_scale &&
+        (event->state->committed & WLR_OUTPUT_STATE_MODE) &&
+        event->state->mode_type == WLR_OUTPUT_STATE_MODE_CUSTOM) {
+        int width = event->state->custom_mode.width;
+        int height = event->state->custom_mode.height;
+        if (width == output->wlr_output->width) {
+            width = output->nested_logical_width;
+        }
+        if (height == output->wlr_output->height) {
+            height = output->nested_logical_height;
+        }
+        output_set_nested_mode(output, width, height);
+        return;
+    }
+
     /* Apply the requested state */
     wlr_output_commit_state(output->wlr_output, event->state);
+    if (output->nested_registry &&
+        (event->state->committed & WLR_OUTPUT_STATE_MODE) &&
+        event->state->mode_type == WLR_OUTPUT_STATE_MODE_CUSTOM) {
+        output->nested_logical_width = event->state->custom_mode.width;
+        output->nested_logical_height = event->state->custom_mode.height;
+    }
 }
 
 void output_handle_destroy(struct wl_listener *listener, void *data) {
@@ -440,6 +582,22 @@ void output_handle_destroy(struct wl_listener *listener, void *data) {
     wl_list_remove(&output->frame.link);
     wl_list_remove(&output->request_state.link);
     wl_list_remove(&output->destroy.link);
+
+    if (output->nested_fractional_scale) {
+        wp_fractional_scale_v1_destroy(output->nested_fractional_scale);
+    }
+    if (output->nested_viewport) {
+        wp_viewport_destroy(output->nested_viewport);
+    }
+    if (output->nested_scale_manager) {
+        wp_fractional_scale_manager_v1_destroy(output->nested_scale_manager);
+    }
+    if (output->nested_viewporter) {
+        wp_viewporter_destroy(output->nested_viewporter);
+    }
+    if (output->nested_registry) {
+        wl_registry_destroy(output->nested_registry);
+    }
 
     if (output->canvas_status_texture) {
         wlr_texture_destroy(output->canvas_status_texture);

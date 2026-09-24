@@ -10,7 +10,9 @@
 
 #include <linux/input-event-codes.h>
 #include <math.h>
+#include <string.h>
 
+#include <wlr/backend/wayland.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_pointer.h>
@@ -182,9 +184,26 @@ void cursor_handle_motion_absolute(struct wl_listener *listener, void *data) {
         wl_container_of(listener, server, cursor_motion_absolute);
     struct wlr_pointer_motion_absolute_event *event = data;
 
+    double x = event->x;
+    double y = event->y;
+    if (wlr_input_device_is_wl(&event->pointer->base) &&
+        event->pointer->output_name) {
+        struct infinidesk_output *output;
+        wl_list_for_each(output, &server->outputs, link) {
+            if (strcmp(output->wlr_output->name,
+                       event->pointer->output_name) == 0 &&
+                output->nested_fractional_scale) {
+                /* wlroots normalises parent logical coordinates by our
+                 * larger render buffer dimensions. Undo that conversion. */
+                x *= output->nested_host_scale;
+                y *= output->nested_host_scale;
+                break;
+            }
+        }
+    }
+
     /* Warp to the absolute position */
-    wlr_cursor_warp_absolute(server->cursor, &event->pointer->base, event->x,
-                             event->y);
+    wlr_cursor_warp_absolute(server->cursor, &event->pointer->base, x, y);
 
     /* Process the motion */
     cursor_process_motion(server, event->time_msec);

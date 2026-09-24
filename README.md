@@ -46,6 +46,12 @@ To directly run:
 nix run
 ```
 
+When running as a window inside another Wayland compositor, Infinidesk uses
+the parent compositor's fractional scale to render a higher-resolution buffer
+while keeping the window's logical size. This requires the parent to support
+`wp_fractional_scale_v1` and `wp_viewporter`. Direct display output continues
+to use the `scale` value from the Infinidesk config.
+
 ## Touchpad controls
 
 - Scroll with two fingers over empty canvas to pan in either direction.
