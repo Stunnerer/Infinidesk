@@ -11,6 +11,7 @@
 #include <wlr/util/log.h>
 
 #include "infinidesk/canvas.h"
+#include "infinidesk/output.h"
 #include "infinidesk/server.h"
 #include "infinidesk/view.h"
 
@@ -161,7 +162,13 @@ void canvas_update_view_positions(struct infinidesk_canvas *canvas) {
     wl_list_for_each(view, &canvas->server->views, link) {
         view_update_scene_position(view);
     }
-    /* Note: Background is now rendered directly in the custom render pass */
+
+    /* The custom render pass reads the viewport directly, so a viewport
+     * change must request a new frame even when no client surface changes. */
+    struct infinidesk_output *output;
+    wl_list_for_each(output, &canvas->server->outputs, link) {
+        wlr_output_schedule_frame(output->wlr_output);
+    }
 }
 
 void canvas_get_viewport_centre(struct infinidesk_canvas *canvas,

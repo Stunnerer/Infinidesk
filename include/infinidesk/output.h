@@ -16,6 +16,7 @@
 
 /* Forward declaration */
 struct infinidesk_server;
+struct wlr_texture;
 
 /* Number of layer shell layers (background, bottom, top, overlay) */
 #define LAYER_SHELL_LAYER_COUNT 4
@@ -39,6 +40,13 @@ struct infinidesk_output {
 
     /* Usable area after accounting for exclusive zones */
     struct wlr_box usable_area;
+
+    /* Cached status texture, rebuilt when text or output scale changes. */
+    struct wlr_texture *canvas_status_texture;
+    char canvas_status_text[128];
+    int canvas_status_width;
+    int canvas_status_height;
+    float canvas_status_output_scale;
 
     struct wl_listener frame;
     struct wl_listener request_state;

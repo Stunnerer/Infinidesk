@@ -8,11 +8,18 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
+#include <cairo.h>
+#include <drm_fourcc.h>
+#include <pango/pangocairo.h>
 #include <wlr/backend/wayland.h>
 #include <wlr/render/pass.h>
+#include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_output.h>
@@ -41,6 +48,9 @@ static void render_layer_surfaces(struct infinidesk_output *output,
                                   enum zwlr_layer_shell_v1_layer layer);
 static void send_layer_frame_done(struct infinidesk_output *output,
                                   struct timespec *now);
+static void render_canvas_status(struct infinidesk_output *output,
+                                 struct wlr_render_pass *pass, int width,
+                                 int height);
 
 void output_init(struct infinidesk_server *server) {
     server->new_output.notify = handle_new_output;
@@ -233,6 +243,9 @@ static void output_render_custom(struct infinidesk_output *output) {
     /* 2. Bottom layer */
     render_layer_surfaces(output, pass, ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM);
 
+    /* Canvas status stays on the background and moves with the screen. */
+    render_canvas_status(output, pass, width, height);
+
     /* 3. Render views back-to-front (reverse iteration since list is
      * front-to-back) */
     float output_scale = wlr_output->scale;
@@ -298,6 +311,103 @@ static void output_render_custom(struct infinidesk_output *output) {
     send_layer_frame_done(output, &now);
 }
 
+static void render_canvas_status(struct infinidesk_output *output,
+                                 struct wlr_render_pass *pass, int width,
+                                 int height) {
+    const int padding = 9;
+    const int margin = 12;
+    struct infinidesk_server *server = output->server;
+    float output_scale = output->wlr_output->scale;
+    int logical_width, logical_height;
+    double centre_x, centre_y;
+    char text[sizeof(output->canvas_status_text)];
+
+    wlr_output_effective_resolution(output->wlr_output, &logical_width,
+                                    &logical_height);
+    canvas_get_viewport_centre(&server->canvas, logical_width, logical_height,
+                               &centre_x, &centre_y);
+    snprintf(text, sizeof(text), "Center: (%.1f, %.1f)  Zoom: %.0f%%",
+             centre_x, centre_y, server->canvas.scale * 100.0);
+
+    if (!output->canvas_status_texture ||
+        strcmp(text, output->canvas_status_text) != 0 ||
+        output->canvas_status_output_scale != output_scale) {
+        cairo_surface_t *measure_surface =
+            cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+        cairo_t *measure_cr = cairo_create(measure_surface);
+        PangoLayout *measure_layout = pango_cairo_create_layout(measure_cr);
+        PangoFontDescription *font =
+            pango_font_description_from_string("Sans 11");
+        pango_layout_set_font_description(measure_layout, font);
+        pango_layout_set_text(measure_layout, text, -1);
+
+        int text_width, text_height;
+        pango_layout_get_pixel_size(measure_layout, &text_width, &text_height);
+        int texture_width = (int)ceil((text_width + 2 * padding) * output_scale);
+        int texture_height =
+            (int)ceil((text_height + 2 * padding) * output_scale);
+
+        g_object_unref(measure_layout);
+        cairo_destroy(measure_cr);
+        cairo_surface_destroy(measure_surface);
+
+        cairo_surface_t *surface = cairo_image_surface_create(
+            CAIRO_FORMAT_ARGB32, texture_width, texture_height);
+        cairo_t *cr = cairo_create(surface);
+        cairo_scale(cr, output_scale, output_scale);
+        cairo_set_source_rgba(cr, 0.08, 0.08, 0.08, 0.72);
+        cairo_rectangle(cr, 0, 0, texture_width / output_scale,
+                        texture_height / output_scale);
+        cairo_fill(cr);
+
+        PangoLayout *layout = pango_cairo_create_layout(cr);
+        pango_layout_set_font_description(layout, font);
+        pango_layout_set_text(layout, text, -1);
+        cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+        cairo_move_to(cr, padding, padding);
+        pango_cairo_show_layout(cr, layout);
+
+        cairo_surface_flush(surface);
+        struct wlr_texture *texture = wlr_texture_from_pixels(
+            server->renderer, DRM_FORMAT_ARGB8888,
+            cairo_image_surface_get_stride(surface), texture_width,
+            texture_height, cairo_image_surface_get_data(surface));
+
+        g_object_unref(layout);
+        pango_font_description_free(font);
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+
+        if (texture) {
+            if (output->canvas_status_texture) {
+                wlr_texture_destroy(output->canvas_status_texture);
+            }
+            output->canvas_status_texture = texture;
+            output->canvas_status_width = texture_width;
+            output->canvas_status_height = texture_height;
+            output->canvas_status_output_scale = output_scale;
+            snprintf(output->canvas_status_text,
+                     sizeof(output->canvas_status_text), "%s", text);
+        }
+    }
+
+    int inset = (int)ceil(margin * output_scale);
+    if (!output->canvas_status_texture ||
+        width < output->canvas_status_width + 2 * inset ||
+        height < output->canvas_status_height + 2 * inset) {
+        return;
+    }
+
+    wlr_render_pass_add_texture(
+        pass, &(struct wlr_render_texture_options){
+                  .texture = output->canvas_status_texture,
+                  .dst_box = {.x = inset,
+                              .y = height - output->canvas_status_height - inset,
+                              .width = output->canvas_status_width,
+                              .height = output->canvas_status_height},
+              });
+}
+
 /* Iterator to send frame_done to each surface */
 static void send_frame_done_iterator(struct wlr_surface *surface, int sx,
                                      int sy, void *data) {
@@ -330,6 +440,10 @@ void output_handle_destroy(struct wl_listener *listener, void *data) {
     wl_list_remove(&output->frame.link);
     wl_list_remove(&output->request_state.link);
     wl_list_remove(&output->destroy.link);
+
+    if (output->canvas_status_texture) {
+        wlr_texture_destroy(output->canvas_status_texture);
+    }
 
     free(output);
 }
