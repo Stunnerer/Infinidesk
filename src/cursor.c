@@ -46,6 +46,25 @@ static int scroll_pan_timer_callback(void *data) {
     return 0; /* Don't repeat */
 }
 
+static void cursor_scroll_pan(struct infinidesk_server *server,
+                              const struct wlr_pointer_axis_event *event) {
+    server->scroll_panning = true;
+    if (!server->scroll_pan_timer) {
+        server->scroll_pan_timer = wl_event_loop_add_timer(
+            server->event_loop, scroll_pan_timer_callback, server);
+    }
+    if (server->scroll_pan_timer) {
+        wl_event_source_timer_update(server->scroll_pan_timer,
+                                     SCROLL_PAN_TIMEOUT_MS);
+    }
+
+    if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
+        canvas_pan_delta(&server->canvas, 0, event->delta);
+    } else {
+        canvas_pan_delta(&server->canvas, event->delta, 0);
+    }
+}
+
 static bool cursor_over_content(struct infinidesk_server *server) {
     double sx, sy;
     struct wlr_surface *surface = NULL;
@@ -391,7 +410,14 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
         wl_container_of(listener, server, cursor_axis);
     struct wlr_pointer_axis_event *event = data;
 
-    /* Alt + Scroll: Zoom canvas */
+    /* Super + two-finger scroll pans even over an application. */
+    if (server->super_pressed &&
+        event->source == WL_POINTER_AXIS_SOURCE_FINGER) {
+        cursor_scroll_pan(server, event);
+        return;
+    }
+
+    /* Super + mouse wheel zooms the canvas. */
     if (server->super_pressed) {
         if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
             double factor = (event->delta < 0) ? ZOOM_SCROLL_FACTOR
@@ -399,7 +425,7 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
             canvas_zoom(&server->canvas, factor, server->cursor->x,
                         server->cursor->y);
         }
-        /* Ignore horizontal scroll when Alt is held */
+        /* Ignore horizontal wheel scrolling while Super is held. */
         return;
     }
 
@@ -409,16 +435,7 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
      * gesture mid-pan.
      */
     if (server->scroll_panning) {
-        if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
-            canvas_pan_delta(&server->canvas, 0, event->delta);
-        } else {
-            canvas_pan_delta(&server->canvas, event->delta, 0);
-        }
-        /* Reset the timer on each scroll event */
-        if (server->scroll_pan_timer) {
-            wl_event_source_timer_update(server->scroll_pan_timer,
-                                         SCROLL_PAN_TIMEOUT_MS);
-        }
+        cursor_scroll_pan(server, event);
         return;
     }
 
@@ -458,24 +475,7 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
             event->delta_discrete, event->source, event->relative_direction);
     } else {
         /* Scroll over empty canvas - start pan gesture */
-        server->scroll_panning = true;
-
-        /* Create or reset the timer to end the gesture */
-        if (server->scroll_pan_timer) {
-            wl_event_source_timer_update(server->scroll_pan_timer,
-                                         SCROLL_PAN_TIMEOUT_MS);
-        } else {
-            server->scroll_pan_timer = wl_event_loop_add_timer(
-                server->event_loop, scroll_pan_timer_callback, server);
-            wl_event_source_timer_update(server->scroll_pan_timer,
-                                         SCROLL_PAN_TIMEOUT_MS);
-        }
-
-        if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
-            canvas_pan_delta(&server->canvas, 0, event->delta);
-        } else {
-            canvas_pan_delta(&server->canvas, event->delta, 0);
-        }
+        cursor_scroll_pan(server, event);
     }
 }
 
