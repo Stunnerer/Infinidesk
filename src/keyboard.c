@@ -18,6 +18,7 @@
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "infinidesk/canvas.h"
 #include "infinidesk/config.h"
 #include "infinidesk/drawing.h"
 #include "infinidesk/keyboard.h"
@@ -241,6 +242,11 @@ static void action_gather_windows(struct infinidesk_server *server) {
     views_gather(server, 20.0); /* 20px minimum gap */
 }
 
+static void action_reset_zoom(struct infinidesk_server *server) {
+    canvas_set_scale(&server->canvas, 1.0, server->cursor->x,
+                     server->cursor->y);
+}
+
 static void action_window_switcher(struct infinidesk_server *server) {
     if (!server->switcher.active) {
         switcher_start(&server->switcher);
@@ -260,6 +266,7 @@ static const struct {
     {"undo_stroke", action_undo_stroke},
     {"redo_stroke", action_redo_stroke},
     {"gather_windows", action_gather_windows},
+    {"reset_zoom", action_reset_zoom},
     {"window_switcher", action_window_switcher},
 };
 #define ACTION_TABLE_SIZE (sizeof(action_table) / sizeof(action_table[0]))

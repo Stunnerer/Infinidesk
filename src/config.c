@@ -53,6 +53,7 @@ static const char *DEFAULT_CONFIG =
     "\"super + u\" = \"undo_stroke\"\n"
     "\"super + r\" = \"redo_stroke\"\n"
     "\"super + g\" = \"gather_windows\"\n"
+    "\"super + 0\" = \"reset_zoom\"\n"
     "\"alt + tab\" = \"window_switcher\"\n";
 
 /*
@@ -607,7 +608,7 @@ static void config_set_default_keybinds(struct infinidesk_config *config) {
         {"super + Escape", "exit"},       {"super + d", "toggle_drawing"},
         {"super + c", "clear_drawings"},  {"super + u", "undo_stroke"},
         {"super + r", "redo_stroke"},     {"super + g", "gather_windows"},
-        {"alt + Tab", "window_switcher"},
+        {"super + 0", "reset_zoom"},      {"alt + Tab", "window_switcher"},
     };
     int count = sizeof(defaults) / sizeof(defaults[0]);
     int capacity = count + 4;

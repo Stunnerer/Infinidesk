@@ -38,6 +38,7 @@ static void print_usage(const char *prog_name) {
             "  Super + Q          Close focused window\n"
             "  Super + Escape     Exit compositor\n"
             "  Super + D          Toggle drawing mode\n"
+            "  Super + 0          Reset zoom to 100%%\n"
             "  Super + G          Gather windows\n"
             "  Alt + Tab          Window switcher\n"
             "  Super + Left-drag  Move window\n"
