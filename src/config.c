@@ -10,6 +10,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,11 @@ static const char *DEFAULT_CONFIG =
     "# Distance in screen pixels; set either value to 0 to disable it.\n"
     "screen_edges = 12\n"
     "window_edges = 12\n"
+    "\n"
+    "[scroll]\n"
+    "# Canvas speed multipliers (1.0 keeps the original speed).\n"
+    "wheel_speed = 1.0\n"
+    "gesture_speed = 1.0\n"
     "\n"
     "[keybinds]\n"
     "\"super + t\" = \"exec:kitty\"\n"
@@ -694,6 +700,33 @@ static bool parse_snap_distance(const char *line, const char *key, int *value) {
     return true;
 }
 
+static bool parse_scroll_speed(const char *line, const char *key,
+                               double *value) {
+    size_t key_len = strlen(key);
+    if (strncmp(line, key, key_len) != 0) {
+        return false;
+    }
+
+    char *p = skip_whitespace((char *)line + key_len);
+    if (*p != '=') {
+        return false;
+    }
+    p = skip_whitespace(p + 1);
+    char *end;
+    errno = 0;
+    double speed = strtod(p, &end);
+    bool has_digits = end != p;
+    end = skip_whitespace(end);
+    if (!has_digits || errno != 0 || !isfinite(speed) || speed <= 0 ||
+        speed > 20.0 || (*end != '\0' && *end != '#')) {
+        wlr_log(WLR_ERROR, "Config: invalid %s (expected > 0 and <= 20)",
+                key);
+        return true;
+    }
+    *value = speed;
+    return true;
+}
+
 bool config_load(struct infinidesk_config *config) {
     memset(config, 0, sizeof(*config));
 
@@ -701,6 +734,8 @@ bool config_load(struct infinidesk_config *config) {
     config->scale = 1.0f;
     config->snap_screen_px = 12;
     config->snap_window_px = 12;
+    config->wheel_speed = 1.0;
+    config->gesture_speed = 1.0;
 
     char *path = get_config_path();
     if (!path) {
@@ -728,6 +763,7 @@ bool config_load(struct infinidesk_config *config) {
     /* First pass: parse simple key-value pairs */
     char line[MAX_LINE_LENGTH];
     bool in_snapping = false;
+    bool in_scroll = false;
     while (fgets(line, sizeof(line), f)) {
         char *p = skip_whitespace(line);
 
@@ -740,7 +776,17 @@ bool config_load(struct infinidesk_config *config) {
 
         if (*p == '[') {
             in_snapping = strcmp(p, "[snapping]") == 0;
+            in_scroll = strcmp(p, "[scroll]") == 0;
             continue;
+        }
+
+        if (in_scroll) {
+            if (parse_scroll_speed(p, "wheel_speed",
+                                   &config->wheel_speed) ||
+                parse_scroll_speed(p, "gesture_speed",
+                                   &config->gesture_speed)) {
+                continue;
+            }
         }
 
         if (in_snapping) {

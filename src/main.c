@@ -103,6 +103,8 @@ int main(int argc, char *argv[]) {
         server.output_scale = config.scale;
         server.snap_screen_px = config.snap_screen_px;
         server.snap_window_px = config.snap_window_px;
+        server.wheel_speed = config.wheel_speed;
+        server.gesture_speed = config.gesture_speed;
 
         /*
          * Transfer keybind ownership from config to server.

@@ -49,6 +49,8 @@ bool server_init(struct infinidesk_server *server) {
     server->output_scale = 1.0f;
     server->snap_screen_px = 12;
     server->snap_window_px = 12;
+    server->wheel_speed = 1.0;
+    server->gesture_speed = 1.0;
 
     /* Create the Wayland display */
     server->wl_display = wl_display_create();

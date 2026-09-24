@@ -51,6 +51,10 @@ struct infinidesk_config {
     int snap_screen_px;
     int snap_window_px;
 
+    /* Canvas scroll multipliers for wheel and two-finger gestures. */
+    double wheel_speed;
+    double gesture_speed;
+
     /* Keybindings */
     struct keybind *keybinds;
     int keybind_count;

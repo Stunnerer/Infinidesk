@@ -142,6 +142,8 @@ struct infinidesk_server {
     float output_scale;
     int snap_screen_px;
     int snap_window_px;
+    double wheel_speed;
+    double gesture_speed;
 
     /* Configurable keybindings (owned by the server, freed on shutdown) */
     struct keybind *keybinds;

@@ -50,6 +50,9 @@ static int scroll_pan_timer_callback(void *data) {
 
 static void cursor_scroll_pan(struct infinidesk_server *server,
                               const struct wlr_pointer_axis_event *event) {
+    double speed = event->source == WL_POINTER_AXIS_SOURCE_FINGER
+                       ? server->gesture_speed
+                       : server->wheel_speed;
     server->scroll_panning = true;
     if (!server->scroll_pan_timer) {
         server->scroll_pan_timer = wl_event_loop_add_timer(
@@ -61,9 +64,9 @@ static void cursor_scroll_pan(struct infinidesk_server *server,
     }
 
     if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
-        canvas_pan_delta(&server->canvas, 0, event->delta);
+        canvas_pan_delta(&server->canvas, 0, event->delta * speed);
     } else {
-        canvas_pan_delta(&server->canvas, event->delta, 0);
+        canvas_pan_delta(&server->canvas, event->delta * speed, 0);
     }
 }
 
@@ -439,8 +442,9 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
     /* Super + mouse wheel zooms the canvas. */
     if (server->super_pressed) {
         if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
-            double factor = (event->delta < 0) ? ZOOM_SCROLL_FACTOR
-                                               : (1.0 / ZOOM_SCROLL_FACTOR);
+            double zoom_step = pow(ZOOM_SCROLL_FACTOR, server->wheel_speed);
+            double factor = (event->delta < 0) ? zoom_step
+                                               : (1.0 / zoom_step);
             canvas_zoom(&server->canvas, factor, server->cursor->x,
                         server->cursor->y);
         }

@@ -65,6 +65,23 @@ to use the `scale` value from the Infinidesk config.
 The bottom-left corner of the background shows the canvas coordinates at the
 centre of the viewport and the current zoom percentage.
 
+## Canvas scroll speed
+
+Add separate speed multipliers for mouse wheel scrolling and two-finger
+touchpad scrolling to `~/.config/infinidesk/infinidesk.toml`:
+
+```toml
+[scroll]
+wheel_speed = 1.0
+gesture_speed = 1.0
+```
+
+Values greater than `1.0` move the canvas faster; values between `0` and
+`1.0` slow it down. Valid values are greater than `0` and at most `20`.
+`wheel_speed` also changes the speed of Super + wheel zoom. Scrolling passed
+to application windows and pinch zoom keep their usual behavior. Changes
+take effect after restarting Infinidesk.
+
 ## Window snapping
 
 While moving or resizing a window, its edges snap to nearby window edges and
