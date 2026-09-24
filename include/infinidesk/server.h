@@ -80,6 +80,7 @@ struct infinidesk_server {
     struct wl_listener new_input;
     struct wl_listener request_cursor;
     struct wl_listener request_set_selection;
+    struct wl_listener request_set_primary_selection;
 
     /* Cursor */
     struct wlr_cursor *cursor;

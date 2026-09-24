@@ -18,6 +18,7 @@
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
@@ -107,6 +108,11 @@ bool server_init(struct infinidesk_server *server) {
         wlr_data_device_manager_create(server->wl_display);
     if (!server->data_device_manager) {
         wlr_log(WLR_ERROR, "Failed to create data device manager");
+        goto error_allocator;
+    }
+
+    if (!wlr_primary_selection_v1_device_manager_create(server->wl_display)) {
+        wlr_log(WLR_ERROR, "Failed to create primary selection manager");
         goto error_allocator;
     }
 

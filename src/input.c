@@ -9,15 +9,35 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_pointer.h>
+#include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/util/log.h>
 
 #include "infinidesk/input.h"
 #include "infinidesk/keyboard.h"
 #include "infinidesk/server.h"
+
+static void handle_request_set_selection(struct wl_listener *listener,
+                                         void *data) {
+    struct infinidesk_server *server =
+        wl_container_of(listener, server, request_set_selection);
+    struct wlr_seat_request_set_selection_event *event = data;
+
+    wlr_seat_set_selection(server->seat, event->source, event->serial);
+}
+
+static void handle_request_set_primary_selection(struct wl_listener *listener,
+                                                 void *data) {
+    struct infinidesk_server *server =
+        wl_container_of(listener, server, request_set_primary_selection);
+    struct wlr_seat_request_set_primary_selection_event *event = data;
+
+    wlr_seat_set_primary_selection(server->seat, event->source, event->serial);
+}
 
 void input_init(struct infinidesk_server *server) {
     /* Create the seat */
@@ -26,6 +46,15 @@ void input_init(struct infinidesk_server *server) {
         wlr_log(WLR_ERROR, "Failed to create seat");
         return;
     }
+
+    server->request_set_selection.notify = handle_request_set_selection;
+    wl_signal_add(&server->seat->events.request_set_selection,
+                  &server->request_set_selection);
+
+    server->request_set_primary_selection.notify =
+        handle_request_set_primary_selection;
+    wl_signal_add(&server->seat->events.request_set_primary_selection,
+                  &server->request_set_primary_selection);
 
     /* Set up new input listener */
     server->new_input.notify = handle_new_input;
