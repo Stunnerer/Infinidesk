@@ -50,9 +50,14 @@ nix run
 
 - Scroll with two fingers over empty canvas to pan in either direction.
 - Scroll over an app window to scroll that app.
+- Hold Super and scroll with two fingers to pan the canvas over any window.
+- Hold Super and use the mouse wheel to zoom the canvas.
 - Pinch with two or more fingers to zoom the canvas around the pointer. Moving
   the centre of the pinch pans the canvas at the same time.
 - Drag with the middle mouse button over empty canvas to pan without scrolling.
+
+The bottom-left corner of the background shows the canvas coordinates at the
+centre of the viewport and the current zoom percentage.
 
 ## Window snapping
 
@@ -73,3 +78,7 @@ after restarting Infinidesk.
 Keyboard shortcuts in the `[keybinds]` section use US physical key positions.
 For example, `"super + d"` uses the same key with English or Russian input
 selected; text sent to applications still follows the selected layout.
+
+Press `Super+0` to reset canvas zoom to 100% around the pointer. For an
+existing config with a `[keybinds]` section, add
+`"super + 0" = "reset_zoom"` to enable this shortcut.
