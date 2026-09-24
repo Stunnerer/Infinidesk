@@ -13,7 +13,7 @@ Infinidesk is a new, **spatially-oriented** way to navigate your desktop. Drawin
 ## Key features
 
 - **Wayland-native:** Supports the latest and greatest apps right out of the box.
-- **Touchpad gesture support:** Zoom across the canvas with 2-finger pan!
+- **Touchpad gesture support:** Pan the canvas with two-finger scrolling and pinch to zoom.
 - **Fast navigation:** Use alt+tab to rapidly warp between windows.
 - **Freeform zoom:** Zoom in to fine app details, or out to show more windows!
 - **Shell layering:** Run a wallpaper daemon on the bottom layer, or render a taskbar over the top.
@@ -45,3 +45,31 @@ To directly run:
 ```shell
 nix run
 ```
+
+## Touchpad controls
+
+- Scroll with two fingers over empty canvas to pan in either direction.
+- Scroll over an app window to scroll that app.
+- Pinch with two or more fingers to zoom the canvas around the pointer. Moving
+  the centre of the pinch pans the canvas at the same time.
+- Drag with the middle mouse button over empty canvas to pan without scrolling.
+
+## Window snapping
+
+While moving or resizing a window, its edges snap to nearby window edges and
+the edges of the screen. The distances are measured in logical screen pixels,
+so they stay the same when the canvas is zoomed. Add this section to
+`~/.config/infinidesk/infinidesk.toml` to change the distances:
+
+```toml
+[snapping]
+screen_edges = 12
+window_edges = 12
+```
+
+Set either value to `0` to disable that type of snapping. Changes take effect
+after restarting Infinidesk.
+
+Keyboard shortcuts in the `[keybinds]` section use US physical key positions.
+For example, `"super + d"` uses the same key with English or Russian input
+selected; text sent to applications still follows the selected layout.

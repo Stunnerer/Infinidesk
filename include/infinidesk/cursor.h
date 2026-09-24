@@ -39,6 +39,11 @@ void cursor_handle_button(struct wl_listener *listener, void *data);
  */
 void cursor_handle_axis(struct wl_listener *listener, void *data);
 
+/* Handle touchpad pinch gestures for canvas zoom. */
+void cursor_handle_pinch_begin(struct wl_listener *listener, void *data);
+void cursor_handle_pinch_update(struct wl_listener *listener, void *data);
+void cursor_handle_pinch_end(struct wl_listener *listener, void *data);
+
 /*
  * Handle cursor frame events.
  */

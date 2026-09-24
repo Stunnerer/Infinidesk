@@ -13,6 +13,7 @@
 
 #include <wlr/backend/wayland.h>
 #include <wlr/render/pass.h>
+#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
@@ -285,8 +286,9 @@ static void output_render_custom(struct infinidesk_output *output) {
     /* Send frame done to views and their popups */
     wl_list_for_each(view, &server->views, link) {
         if (view->xdg_toplevel->base->surface->mapped) {
-            wlr_xdg_surface_for_each_surface(view->xdg_toplevel->base,
-                                             send_frame_done_iterator, &now);
+            wlr_surface_for_each_surface(
+                view->xdg_toplevel->base->surface, send_frame_done_iterator,
+                &now);
             wlr_xdg_surface_for_each_popup_surface(
                 view->xdg_toplevel->base, send_frame_done_iterator, &now);
         }

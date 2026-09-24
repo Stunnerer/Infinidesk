@@ -9,11 +9,14 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <linux/input-event-codes.h>
+#include <math.h>
 
 #include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xcursor_manager.h>
+#include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/edges.h>
 #include <wlr/util/log.h>
 #include <wlr/xcursor.h>
@@ -41,6 +44,38 @@ static int scroll_pan_timer_callback(void *data) {
     struct infinidesk_server *server = data;
     server->scroll_panning = false;
     return 0; /* Don't repeat */
+}
+
+static bool cursor_over_content(struct infinidesk_server *server) {
+    double sx, sy;
+    struct wlr_surface *surface = NULL;
+    struct infinidesk_output *output = output_get_primary(server);
+
+    if (output && layer_surface_at(output, server->cursor->x,
+                                   server->cursor->y, &surface, &sx, &sy)) {
+        return true;
+    }
+    if (server_view_at(server, server->cursor->x, server->cursor->y, &surface,
+                       &sx, &sy)) {
+        return true;
+    }
+    if (server_view_edge_at(server, server->cursor->x, server->cursor->y,
+                            NULL) != WLR_EDGE_NONE) {
+        return true;
+    }
+    return server->drawing.drawing_mode &&
+           drawing_ui_get_button_at(&server->drawing.ui_panel,
+                                    server->cursor->x,
+                                    server->cursor->y) != UI_BUTTON_NONE;
+}
+
+static bool cursor_over_popup(struct infinidesk_server *server) {
+    struct wlr_surface *surface = NULL;
+    double sx, sy;
+    server_view_at(server, server->cursor->x, server->cursor->y, &surface,
+                   &sx, &sy);
+    return surface && wlr_xdg_popup_try_from_wlr_surface(
+                          wlr_surface_get_root_surface(surface));
 }
 
 void cursor_init(struct infinidesk_server *server) {
@@ -80,6 +115,17 @@ void cursor_init(struct infinidesk_server *server) {
     server->cursor_frame.notify = cursor_handle_frame;
     wl_signal_add(&server->cursor->events.frame, &server->cursor_frame);
 
+    server->cursor_pinch_begin.notify = cursor_handle_pinch_begin;
+    wl_signal_add(&server->cursor->events.pinch_begin,
+                  &server->cursor_pinch_begin);
+
+    server->cursor_pinch_update.notify = cursor_handle_pinch_update;
+    wl_signal_add(&server->cursor->events.pinch_update,
+                  &server->cursor_pinch_update);
+
+    server->cursor_pinch_end.notify = cursor_handle_pinch_end;
+    wl_signal_add(&server->cursor->events.pinch_end, &server->cursor_pinch_end);
+
     /* Set up seat request_set_cursor listener */
     server->request_cursor.notify = cursor_handle_request_cursor;
     wl_signal_add(&server->seat->events.request_set_cursor,
@@ -88,9 +134,13 @@ void cursor_init(struct infinidesk_server *server) {
     /* Initialise cursor state */
     server->cursor_mode = INFINIDESK_CURSOR_PASSTHROUGH;
     server->grabbed_view = NULL;
+    server->pan_button = 0;
     server->super_pressed = false;
     server->scroll_panning = false;
     server->scroll_pan_timer = NULL;
+    server->pinch_active = false;
+    server->pinch_pointer = NULL;
+    server->pinch_start_scale = 1.0;
 
     wlr_log(WLR_DEBUG, "Cursor handling initialised");
 }
@@ -126,7 +176,30 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
         wl_container_of(listener, server, cursor_button);
     struct wlr_pointer_button_event *event = data;
 
+    if (server->cursor_mode == INFINIDESK_CURSOR_PAN &&
+        event->state == WL_POINTER_BUTTON_STATE_RELEASED &&
+        event->button == server->pan_button) {
+        if (event->button == BTN_RIGHT) {
+            /* Super+right press is forwarded below; balance it on release. */
+            wlr_seat_pointer_notify_button(server->seat, event->time_msec,
+                                           event->button, event->state);
+        }
+        canvas_pan_end(&server->canvas);
+        cursor_reset_mode(server);
+        return;
+    }
+
     if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        if (event->button == BTN_MIDDLE &&
+            server->cursor_mode == INFINIDESK_CURSOR_PASSTHROUGH &&
+            !cursor_over_content(server)) {
+            server->cursor_mode = INFINIDESK_CURSOR_PAN;
+            server->pan_button = BTN_MIDDLE;
+            canvas_pan_begin(&server->canvas, server->cursor->x,
+                             server->cursor->y);
+            return;
+        }
+
         /*
          * Check if clicking on a resize edge before notifying the seat.
          * We don't want to forward the button press to clients when
@@ -134,8 +207,12 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
          */
         if (event->button == BTN_LEFT) {
             struct infinidesk_view *edge_view = NULL;
-            uint32_t edges = server_view_edge_at(server, server->cursor->x,
-                                                 server->cursor->y, &edge_view);
+            uint32_t edges = cursor_over_popup(server)
+                                 ? WLR_EDGE_NONE
+                                 : server_view_edge_at(server,
+                                                       server->cursor->x,
+                                                       server->cursor->y,
+                                                       &edge_view);
 
             if (edges != WLR_EDGE_NONE && edge_view) {
                 wlr_log(WLR_DEBUG, "Beginning edge resize (edges=0x%x)", edges);
@@ -272,6 +349,7 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
                 /* Super + Right click: Begin canvas pan */
                 wlr_log(WLR_DEBUG, "Beginning canvas pan");
                 server->cursor_mode = INFINIDESK_CURSOR_PAN;
+                server->pan_button = BTN_RIGHT;
                 canvas_pan_begin(&server->canvas, server->cursor->x,
                                  server->cursor->y);
                 return;
@@ -291,11 +369,6 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
             if (server->grabbed_view) {
                 view_move_end(server->grabbed_view);
             }
-            cursor_reset_mode(server);
-
-        } else if (server->cursor_mode == INFINIDESK_CURSOR_PAN) {
-            /* End canvas pan */
-            canvas_pan_end(&server->canvas);
             cursor_reset_mode(server);
 
         } else if (server->cursor_mode == INFINIDESK_CURSOR_RESIZE) {
@@ -406,6 +479,56 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
     }
 }
 
+void cursor_handle_pinch_begin(struct wl_listener *listener, void *data) {
+    struct infinidesk_server *server =
+        wl_container_of(listener, server, cursor_pinch_begin);
+    const struct wlr_pointer_pinch_begin_event *event = data;
+
+    if (event->fingers < 2) {
+        return;
+    }
+
+    server->pinch_active = true;
+    server->pinch_pointer = event->pointer;
+    server->pinch_start_scale = server->canvas.scale;
+    server->scroll_panning = false;
+    if (server->scroll_pan_timer) {
+        wl_event_source_timer_update(server->scroll_pan_timer, 0);
+    }
+}
+
+void cursor_handle_pinch_update(struct wl_listener *listener, void *data) {
+    struct infinidesk_server *server =
+        wl_container_of(listener, server, cursor_pinch_update);
+    const struct wlr_pointer_pinch_update_event *event = data;
+
+    if (!server->pinch_active || event->pointer != server->pinch_pointer ||
+        !isfinite(event->scale) || event->scale <= 0) {
+        return;
+    }
+
+    if (isfinite(event->dx) && isfinite(event->dy) &&
+        (event->dx != 0 || event->dy != 0)) {
+        /* Pinch centre movement is already measured in screen pixels. */
+        server->canvas.viewport_x -= event->dx / server->canvas.scale;
+        server->canvas.viewport_y -= event->dy / server->canvas.scale;
+        canvas_update_view_positions(&server->canvas);
+    }
+
+    canvas_set_scale(&server->canvas, server->pinch_start_scale * event->scale,
+                     server->cursor->x, server->cursor->y);
+}
+
+void cursor_handle_pinch_end(struct wl_listener *listener, void *data) {
+    struct infinidesk_server *server =
+        wl_container_of(listener, server, cursor_pinch_end);
+    const struct wlr_pointer_pinch_end_event *event = data;
+    if (event->pointer == server->pinch_pointer) {
+        server->pinch_active = false;
+        server->pinch_pointer = NULL;
+    }
+}
+
 void cursor_handle_frame(struct wl_listener *listener, void *data) {
     (void)data;
     struct infinidesk_server *server =
@@ -489,8 +612,10 @@ void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
      * This takes priority over normal view hover.
      */
     struct infinidesk_view *edge_view = NULL;
-    uint32_t edges = server_view_edge_at(server, server->cursor->x,
-                                         server->cursor->y, &edge_view);
+    uint32_t edges = cursor_over_popup(server)
+                         ? WLR_EDGE_NONE
+                         : server_view_edge_at(server, server->cursor->x,
+                                               server->cursor->y, &edge_view);
 
     if (edges != WLR_EDGE_NONE && edge_view) {
         /* Cursor is on a resize edge - show resize cursor */
@@ -564,6 +689,7 @@ void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
 void cursor_reset_mode(struct infinidesk_server *server) {
     server->cursor_mode = INFINIDESK_CURSOR_PASSTHROUGH;
     server->grabbed_view = NULL;
+    server->pan_button = 0;
 
     wlr_log(WLR_DEBUG, "Cursor mode reset to passthrough");
 }

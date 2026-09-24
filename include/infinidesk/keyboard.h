@@ -22,6 +22,7 @@ struct infinidesk_keyboard {
     struct wl_list link; /* infinidesk_server.keyboards */
     struct infinidesk_server *server;
     struct wlr_keyboard *wlr_keyboard;
+    struct xkb_keymap *binding_keymap; /* US physical key positions */
 
     struct wl_listener key;
     struct wl_listener modifiers;

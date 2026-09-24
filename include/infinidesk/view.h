@@ -64,8 +64,13 @@ struct infinidesk_view {
     double resize_start_y;
     int resize_start_width; /* View size when resize started */
     int resize_start_height;
-    int resize_pending_width;  /* Last requested width (for commit sync) */
-    int resize_pending_height; /* Last requested height (for commit sync) */
+    int resize_pending_width; /* Latest size requested by the pointer */
+    int resize_pending_height;
+    int resize_sent_width; /* Last size sent to the client */
+    int resize_sent_height;
+    uint32_t resize_configure_serial; /* Awaiting a client commit */
+    uint32_t resize_finish_serial; /* Final configure awaiting a commit */
+    uint32_t resize_anchor_edges; /* Edges anchored until that commit */
 
     /* Focus animation state */
     bool focused;                 /* Current focus state */

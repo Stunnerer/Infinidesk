@@ -56,6 +56,15 @@ void keyboard_create(struct infinidesk_server *server,
 
     wlr_keyboard_set_keymap(wlr_keyboard, keymap);
     xkb_keymap_unref(keymap);
+
+    /* Resolve configured key names against fixed US key positions. The
+     * client's active layout still receives its normal translated keys. */
+    struct xkb_rule_names binding_names = {.layout = "us"};
+    keyboard->binding_keymap = xkb_keymap_new_from_names(
+        context, &binding_names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    if (!keyboard->binding_keymap) {
+        wlr_log(WLR_ERROR, "Failed to create keybinding keymap");
+    }
     xkb_context_unref(context);
 
     /* Set up repeat info (rate in Hz, delay in ms) */
@@ -118,10 +127,35 @@ void keyboard_handle_key(struct wl_listener *listener, void *data) {
     /* Check for compositor keybindings on key press */
     bool handled = false;
     if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-        for (int i = 0; i < nsyms; i++) {
-            handled = keyboard_handle_keybinding(server, modifiers, syms[i]);
-            if (handled) {
-                break;
+        if (keyboard->binding_keymap) {
+            xkb_level_index_t levels = xkb_keymap_num_levels_for_key(
+                keyboard->binding_keymap, keycode, 0);
+            /* Level zero is the physical key; level one also permits binds
+             * written with a shifted symbol, such as "super + exclam". */
+            for (xkb_level_index_t level = 0; level < levels && level < 2 &&
+                                               !handled;
+                 level++) {
+                if (level == 1 && !(modifiers & WLR_MODIFIER_SHIFT)) {
+                    continue;
+                }
+                const xkb_keysym_t *binding_syms;
+                int count = xkb_keymap_key_get_syms_by_level(
+                    keyboard->binding_keymap, keycode, 0, level,
+                    &binding_syms);
+                for (int i = 0; i < count; i++) {
+                    if (keyboard_handle_keybinding(server, modifiers,
+                                                   binding_syms[i])) {
+                        handled = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            for (int i = 0; i < nsyms; i++) {
+                if (keyboard_handle_keybinding(server, modifiers, syms[i])) {
+                    handled = true;
+                    break;
+                }
             }
         }
     }
@@ -161,6 +195,9 @@ void keyboard_handle_destroy(struct wl_listener *listener, void *data) {
     /* Remove from server list */
     wl_list_remove(&keyboard->link);
 
+    if (keyboard->binding_keymap) {
+        xkb_keymap_unref(keyboard->binding_keymap);
+    }
     free(keyboard);
 }
 

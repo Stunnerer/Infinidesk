@@ -8,12 +8,14 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <math.h>
 #include <stdlib.h>
 
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 
+#include "infinidesk/canvas.h"
 #include "infinidesk/output.h"
 #include "infinidesk/server.h"
 #include "infinidesk/view.h"
@@ -124,11 +126,21 @@ static void handle_popup_commit(struct wl_listener *listener, void *data) {
                  * We need to calculate where the usable area is relative to
                  * the toplevel's position.
                  */
+                struct infinidesk_canvas *canvas = &view->server->canvas;
+                struct wlr_box geo;
+                wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo);
+
+                /* The box is relative to the root surface's buffer origin,
+                 * while the view position refers to its window geometry. */
+                double left = canvas->viewport_x - view->x + geo.x;
+                double top = canvas->viewport_y - view->y + geo.y;
                 struct wlr_box constraint_box = {
-                    .x = -view->x,
-                    .y = -view->y,
-                    .width = width,
-                    .height = height,
+                    .x = (int)floor(left),
+                    .y = (int)floor(top),
+                    .width = (int)ceil(left + width / canvas->scale) -
+                             (int)floor(left),
+                    .height = (int)ceil(top + height / canvas->scale) -
+                              (int)floor(top),
                 };
 
                 wlr_xdg_popup_unconstrain_from_box(popup->xdg_popup,

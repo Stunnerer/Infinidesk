@@ -37,6 +37,7 @@ struct infinidesk_view;
 struct infinidesk_output;
 struct infinidesk_keyboard;
 struct infinidesk_layer_surface;
+struct wlr_pointer;
 
 /* Cursor interaction modes */
 enum infinidesk_cursor_mode {
@@ -88,16 +89,23 @@ struct infinidesk_server {
     struct wl_listener cursor_button;
     struct wl_listener cursor_axis;
     struct wl_listener cursor_frame;
+    struct wl_listener cursor_pinch_begin;
+    struct wl_listener cursor_pinch_update;
+    struct wl_listener cursor_pinch_end;
 
     /* Cursor state */
     enum infinidesk_cursor_mode cursor_mode;
     struct infinidesk_view *grabbed_view;
+    uint32_t pan_button; /* Button holding a pointer-driven canvas pan */
     double grab_x, grab_y; /* Cursor position at grab start */
     uint32_t resize_edges; /* For resize operations */
     bool
         scroll_panning; /* Currently scroll-panning (started on empty canvas) */
     struct wl_event_source
         *scroll_pan_timer; /* Timer to end scroll-pan gesture */
+    bool pinch_active;
+    struct wlr_pointer *pinch_pointer;
+    double pinch_start_scale;
 
     /* XDG shell */
     struct wlr_xdg_shell *xdg_shell;
@@ -131,6 +139,8 @@ struct infinidesk_server {
     uint32_t next_view_id;
     /* Output scale factor (from config) */
     float output_scale;
+    int snap_screen_px;
+    int snap_window_px;
 
     /* Configurable keybindings (owned by the server, freed on shutdown) */
     struct keybind *keybinds;

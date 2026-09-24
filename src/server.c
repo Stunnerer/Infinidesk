@@ -46,6 +46,8 @@ bool server_init(struct infinidesk_server *server) {
 
     /* Set default output scale (will be overridden by config if loaded) */
     server->output_scale = 1.0f;
+    server->snap_screen_px = 12;
+    server->snap_window_px = 12;
 
     /* Create the Wayland display */
     server->wl_display = wl_display_create();
@@ -285,6 +287,9 @@ void server_finish(struct infinidesk_server *server) {
         wl_list_remove(&kb->modifiers.link);
         wl_list_remove(&kb->destroy.link);
         wl_list_remove(&kb->link);
+        if (kb->binding_keymap) {
+            xkb_keymap_unref(kb->binding_keymap);
+        }
         free(kb);
     }
 
@@ -310,8 +315,29 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
 
     struct infinidesk_canvas *canvas = &server->canvas;
 
-    /* Views are ordered front-to-back in the list (front first) */
+    /* Popups can extend outside their parent window. They are rendered above
+     * every toplevel, so hit-test them first in the same stacking order. */
     struct infinidesk_view *view;
+    wl_list_for_each(view, &server->views, link) {
+        if (!view->xdg_toplevel->base->surface->mapped) {
+            continue;
+        }
+        struct wlr_box geo;
+        wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo);
+        double screen_x, screen_y;
+        canvas_to_screen(canvas, view->x, view->y, &screen_x, &screen_y);
+        double root_x = (lx - screen_x) / canvas->scale + geo.x;
+        double root_y = (ly - screen_y) / canvas->scale + geo.y;
+        struct wlr_surface *popup_surface =
+            wlr_xdg_surface_popup_surface_at(view->xdg_toplevel->base,
+                                             root_x, root_y, sx, sy);
+        if (popup_surface) {
+            *surface = popup_surface;
+            return view;
+        }
+    }
+
+    /* Views are ordered front-to-back in the list (front first) */
     wl_list_for_each(view, &server->views, link) {
         if (!view->xdg_toplevel->base->surface->mapped) {
             continue;
@@ -321,24 +347,13 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
         struct wlr_box geo;
         wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo);
 
-        /*
-         * Calculate where the view is rendered on screen.
-         * This must match the calculation in view_render().
-         *
-         * In view_render:
-         *   base_x = round(screen_x) - round(geo.x * scale)
-         *
-         * Where screen_x = (view->x - viewport_x) * scale
-         */
+        /* view->x/y are the window geometry origin, not the buffer origin. */
         double screen_x, screen_y;
         canvas_to_screen(canvas, view->x, view->y, &screen_x, &screen_y);
 
-        /*
-         * The top-left corner of the rendered surface on screen.
-         * This accounts for CSD windows where geo.x/y may be non-zero.
-         */
-        double render_x = screen_x - geo.x * canvas->scale;
-        double render_y = screen_y - geo.y * canvas->scale;
+        /* Hit-test the window geometry; popup surfaces were checked above. */
+        double render_x = screen_x;
+        double render_y = screen_y;
 
         /*
          * The rendered size on screen. We use the geometry dimensions
@@ -364,7 +379,7 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
 
             /*
              * Use wlr_xdg_surface_surface_at to find the actual surface
-             * (handles subsurfaces, popups, etc.). This function expects
+             * (handles subsurfaces). This function expects
              * coordinates relative to the XDG surface origin (buffer origin),
              * not the geometry/content origin. For CSD windows, we must add
              * back the geometry offset.
@@ -387,11 +402,11 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
             /*
              * If no surface found at exact point (e.g., in transparent
              * regions of CSD), return the main surface anyway.
-             * Use content-local coordinates for the main surface.
+             * Use buffer-local coordinates for the main surface.
              */
             *surface = view->xdg_toplevel->base->surface;
-            *sx = content_local_x;
-            *sy = content_local_y;
+            *sx = surface_local_x;
+            *sy = surface_local_y;
             return view;
         }
     }
@@ -441,8 +456,8 @@ uint32_t server_view_edge_at(struct infinidesk_server *server, double lx,
         canvas_to_screen(canvas, view->x, view->y, &screen_x, &screen_y);
 
         /* The rendered bounds of the window geometry on screen */
-        double render_x = screen_x - geo.x * canvas->scale;
-        double render_y = screen_y - geo.y * canvas->scale;
+        double render_x = screen_x;
+        double render_y = screen_y;
         double render_width = geo.width * canvas->scale;
         double render_height = geo.height * canvas->scale;
 

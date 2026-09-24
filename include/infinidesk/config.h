@@ -27,7 +27,7 @@ enum keybind_type {
  * Parsed from the [keybinds] section of the config file.
  *
  * The modifier field is a bitmask of WLR_MODIFIER_* values.
- * The key field is an XKB keysym (xkb_keysym_t is uint32_t).
+ * The key field is an XKB keysym matched against the fixed US key positions.
  */
 struct keybind {
     uint32_t modifiers; /* WLR_MODIFIER_* bitmask */
@@ -46,6 +46,10 @@ struct infinidesk_config {
 
     /* Output scale factor (HiDPI scaling) */
     float scale;
+
+    /* Window snapping distances in logical screen pixels (0 disables). */
+    int snap_screen_px;
+    int snap_window_px;
 
     /* Keybindings */
     struct keybind *keybinds;

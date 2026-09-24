@@ -100,6 +100,8 @@ int main(int argc, char *argv[]) {
         /* server.output_scale already set to 1.0f in server_init */
     } else {
         server.output_scale = config.scale;
+        server.snap_screen_px = config.snap_screen_px;
+        server.snap_window_px = config.snap_window_px;
 
         /*
          * Transfer keybind ownership from config to server.

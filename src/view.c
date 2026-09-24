@@ -285,6 +285,114 @@ void view_update_scene_position(struct infinidesk_view *view) {
      */
 }
 
+struct snap_result {
+    double delta;
+    double distance;
+    bool found;
+    bool bounded;
+    double min_target;
+    double max_target;
+};
+
+static void snap_consider(struct snap_result *result, double edge,
+                          double target, double threshold) {
+    double delta = target - edge;
+    double distance = fabs(delta);
+    if (result->bounded &&
+        (target < result->min_target || target > result->max_target)) {
+        return;
+    }
+    if (distance <= threshold &&
+        (!result->found || distance < result->distance)) {
+        result->delta = delta;
+        result->distance = distance;
+        result->found = true;
+    }
+}
+
+/* Nearby corners count as neighbours too. */
+static void snap_to_views(struct infinidesk_view *view, bool horizontal,
+                          double edge, double cross_start, double cross_end,
+                          double threshold, struct snap_result *result) {
+    struct infinidesk_view *other;
+    wl_list_for_each(other, &view->server->views, link) {
+        if (other == view || !other->xdg_toplevel->base->surface->mapped) {
+            continue;
+        }
+
+        double other_x, other_y;
+        int other_width, other_height;
+        view_get_geometry(other, &other_x, &other_y, &other_width,
+                          &other_height);
+        if (other_width <= 0 || other_height <= 0) {
+            continue;
+        }
+
+        double other_cross_start = horizontal ? other_y : other_x;
+        double other_cross_end = other_cross_start +
+                                 (horizontal ? other_height : other_width);
+        if (cross_start > other_cross_end + threshold ||
+            cross_end < other_cross_start - threshold) {
+            continue;
+        }
+
+        double other_start = horizontal ? other_x : other_y;
+        double other_end = other_start +
+                           (horizontal ? other_width : other_height);
+        snap_consider(result, edge, other_start, threshold);
+        snap_consider(result, edge, other_end, threshold);
+    }
+}
+
+static bool snap_screen_bounds(struct infinidesk_view *view,
+                               double *left, double *top,
+                               double *right, double *bottom) {
+    struct infinidesk_output *output = output_get_primary(view->server);
+    if (!output) {
+        return false;
+    }
+
+    int width, height;
+    output_get_effective_resolution(output, &width, &height);
+    struct infinidesk_canvas *canvas = &view->server->canvas;
+    *left = canvas->viewport_x;
+    *top = canvas->viewport_y;
+    *right = *left + width / canvas->scale;
+    *bottom = *top + height / canvas->scale;
+    return true;
+}
+
+static bool snap_resize_edge(struct infinidesk_view *view, bool horizontal,
+                             bool start_edge, double edge,
+                             double cross_start, double cross_end,
+                             double min_target, double max_target,
+                             double *snapped_edge) {
+    struct snap_result result = {
+        .bounded = true,
+        .min_target = min_target,
+        .max_target = max_target,
+    };
+    struct infinidesk_canvas *canvas = &view->server->canvas;
+    double left, top, right, bottom;
+
+    if (view->server->snap_screen_px > 0 &&
+        snap_screen_bounds(view, &left, &top, &right, &bottom)) {
+        double target = horizontal ? (start_edge ? left : right)
+                                   : (start_edge ? top : bottom);
+        snap_consider(&result, edge, target,
+                      view->server->snap_screen_px / canvas->scale);
+    }
+    if (view->server->snap_window_px > 0) {
+        snap_to_views(view, horizontal, edge, cross_start, cross_end,
+                      view->server->snap_window_px / canvas->scale, &result);
+    }
+
+    if (result.found) {
+        *snapped_edge = edge + result.delta;
+    }
+    return result.found;
+}
+
 void view_move_begin(struct infinidesk_view *view, double cursor_x,
                      double cursor_y) {
     view->is_moving = true;
@@ -306,9 +414,44 @@ void view_move_update(struct infinidesk_view *view, double cursor_x,
     double delta_x = cursor_x - view->grab_x;
     double delta_y = cursor_y - view->grab_y;
 
-    /* Move view by the delta */
-    view->x = view->grab_view_x + delta_x;
-    view->y = view->grab_view_y + delta_y;
+    double new_x = view->grab_view_x + delta_x;
+    double new_y = view->grab_view_y + delta_y;
+    struct infinidesk_canvas *canvas = &view->server->canvas;
+    struct wlr_box geo;
+    wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo);
+
+    if (geo.width > 0 && geo.height > 0) {
+        struct snap_result snap_x = {0}, snap_y = {0};
+        double left, top, right, bottom;
+        if (view->server->snap_screen_px > 0 &&
+            snap_screen_bounds(view, &left, &top, &right, &bottom)) {
+            double threshold = view->server->snap_screen_px / canvas->scale;
+            snap_consider(&snap_x, new_x, left, threshold);
+            snap_consider(&snap_x, new_x + geo.width, right, threshold);
+            snap_consider(&snap_y, new_y, top, threshold);
+            snap_consider(&snap_y, new_y + geo.height, bottom, threshold);
+        }
+        if (view->server->snap_window_px > 0) {
+            double threshold = view->server->snap_window_px / canvas->scale;
+            snap_to_views(view, true, new_x, new_y, new_y + geo.height,
+                          threshold, &snap_x);
+            snap_to_views(view, true, new_x + geo.width, new_y,
+                          new_y + geo.height, threshold, &snap_x);
+            snap_to_views(view, false, new_y, new_x, new_x + geo.width,
+                          threshold, &snap_y);
+            snap_to_views(view, false, new_y + geo.height, new_x,
+                          new_x + geo.width, threshold, &snap_y);
+        }
+        if (snap_x.found) {
+            new_x += snap_x.delta;
+        }
+        if (snap_y.found) {
+            new_y += snap_y.delta;
+        }
+    }
+
+    view->x = new_x;
+    view->y = new_y;
 
     /* Update scene position */
     view_update_scene_position(view);
@@ -346,6 +489,11 @@ void view_resize_begin(struct infinidesk_view *view, uint32_t edges,
     view->resize_start_height = geo.height;
     view->resize_pending_width = geo.width;
     view->resize_pending_height = geo.height;
+    view->resize_sent_width = geo.width;
+    view->resize_sent_height = geo.height;
+    view->resize_configure_serial = 0;
+    view->resize_finish_serial = 0;
+    view->resize_anchor_edges = edges & (WLR_EDGE_LEFT | WLR_EDGE_TOP);
 
     /* Notify client that resize has started */
     wlr_xdg_toplevel_set_resizing(view->xdg_toplevel, true);
@@ -414,7 +562,43 @@ void view_resize_update(struct infinidesk_view *view, double cursor_x,
         new_height = min_height;
     }
 
-    /* Store the requested size for commit synchronisation */
+    /* Only the edge being dragged snaps; the opposite edge stays fixed. */
+    double snapped;
+    if (view->resize_edges & WLR_EDGE_LEFT) {
+        double fixed_right = view->resize_start_x + view->resize_start_width;
+        if (snap_resize_edge(view, true, true, new_x, new_y,
+                             new_y + new_height, -INFINITY,
+                             fixed_right - min_width, &snapped)) {
+            new_width = (int)round(fixed_right - snapped);
+            new_x = fixed_right - new_width;
+        }
+    } else if (view->resize_edges & WLR_EDGE_RIGHT) {
+        double fixed_left = view->resize_start_x;
+        if (snap_resize_edge(view, true, false, new_x + new_width, new_y,
+                             new_y + new_height, fixed_left + min_width,
+                             INFINITY, &snapped)) {
+            new_width = (int)round(snapped - fixed_left);
+        }
+    }
+
+    if (view->resize_edges & WLR_EDGE_TOP) {
+        double fixed_bottom = view->resize_start_y + view->resize_start_height;
+        if (snap_resize_edge(view, false, true, new_y, new_x,
+                             new_x + new_width, -INFINITY,
+                             fixed_bottom - min_height, &snapped)) {
+            new_height = (int)round(fixed_bottom - snapped);
+            new_y = fixed_bottom - new_height;
+        }
+    } else if (view->resize_edges & WLR_EDGE_BOTTOM) {
+        double fixed_top = view->resize_start_y;
+        if (snap_resize_edge(view, false, false, new_y + new_height, new_x,
+                             new_x + new_width, fixed_top + min_height,
+                             INFINITY, &snapped)) {
+            new_height = (int)round(snapped - fixed_top);
+        }
+    }
+
+    /* Keep the latest pointer size while the client processes a configure. */
     view->resize_pending_width = new_width;
     view->resize_pending_height = new_height;
 
@@ -430,8 +614,17 @@ void view_resize_update(struct infinidesk_view *view, double cursor_x,
         view_update_scene_position(view);
     }
 
-    /* Request the client to resize */
-    wlr_xdg_toplevel_set_size(view->xdg_toplevel, new_width, new_height);
+    /* Send at most one size request until the client commits it. Fast pointer
+     * motion must not build up a configure/render backlog in slow clients. */
+    if (view->resize_configure_serial == 0 &&
+        (new_width != view->resize_sent_width ||
+         new_height != view->resize_sent_height)) {
+        view->resize_sent_width = new_width;
+        view->resize_sent_height = new_height;
+        view->resize_configure_serial =
+            wlr_xdg_toplevel_set_size(view->xdg_toplevel, new_width,
+                                      new_height);
+    }
 }
 
 void view_resize_end(struct infinidesk_view *view) {
@@ -442,10 +635,20 @@ void view_resize_end(struct infinidesk_view *view) {
     wlr_log(WLR_DEBUG, "view_resize_end");
 
     view->is_resizing = false;
-    view->resize_edges = WLR_EDGE_NONE;
 
-    /* Notify client that resize has ended */
-    wlr_xdg_toplevel_set_resizing(view->xdg_toplevel, false);
+    /* Flush the final pointer position even if an earlier size is in flight.
+     * The resizing=false state is sent in the same configure. */
+    if (view->resize_pending_width != view->resize_sent_width ||
+        view->resize_pending_height != view->resize_sent_height) {
+        view->resize_sent_width = view->resize_pending_width;
+        view->resize_sent_height = view->resize_pending_height;
+        wlr_xdg_toplevel_set_size(view->xdg_toplevel, view->resize_sent_width,
+                                  view->resize_sent_height);
+    }
+    view->resize_configure_serial = 0;
+    view->resize_finish_serial =
+        wlr_xdg_toplevel_set_resizing(view->xdg_toplevel, false);
+    view->resize_edges = WLR_EDGE_NONE;
 }
 
 void view_close(struct infinidesk_view *view) {
@@ -689,6 +892,10 @@ static void handle_unmap(struct wl_listener *listener, void *data) {
         view->server->grabbed_view = NULL;
         view->server->cursor_mode = INFINIDESK_CURSOR_PASSTHROUGH;
     }
+    view->is_resizing = false;
+    view->resize_configure_serial = 0;
+    view->resize_finish_serial = 0;
+    view->resize_anchor_edges = WLR_EDGE_NONE;
 
     /*
      * Reset map animation state.
@@ -722,6 +929,22 @@ static void handle_commit(struct wl_listener *listener, void *data) {
         return;
     }
 
+    /* A size request has reached the client's main surface. Now send only
+     * the newest pointer size, coalescing all intermediate mouse events. */
+    if (view->is_resizing && view->resize_configure_serial != 0 &&
+        (int32_t)(view->xdg_toplevel->base->current.configure_serial -
+                  view->resize_configure_serial) >= 0) {
+        view->resize_configure_serial = 0;
+        if (view->resize_pending_width != view->resize_sent_width ||
+            view->resize_pending_height != view->resize_sent_height) {
+            view->resize_sent_width = view->resize_pending_width;
+            view->resize_sent_height = view->resize_pending_height;
+            view->resize_configure_serial = wlr_xdg_toplevel_set_size(
+                view->xdg_toplevel, view->resize_sent_width,
+                view->resize_sent_height);
+        }
+    }
+
     /*
      * During a left/top edge resize, synchronise the view position with
      * the client's actual committed size. This prevents jitter caused by
@@ -730,16 +953,16 @@ static void handle_commit(struct wl_listener *listener, void *data) {
      * The opposite edge is anchored by computing position from the
      * committed geometry rather than the requested geometry.
      */
-    if (view->is_resizing &&
-        (view->resize_edges & (WLR_EDGE_LEFT | WLR_EDGE_TOP))) {
+    if (view->resize_anchor_edges != WLR_EDGE_NONE &&
+        (view->is_resizing || view->resize_finish_serial != 0)) {
         struct wlr_box geo;
         wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo);
 
-        if (view->resize_edges & WLR_EDGE_LEFT) {
+        if (view->resize_anchor_edges & WLR_EDGE_LEFT) {
             view->x =
                 view->resize_start_x + (view->resize_start_width - geo.width);
         }
-        if (view->resize_edges & WLR_EDGE_TOP) {
+        if (view->resize_anchor_edges & WLR_EDGE_TOP) {
             view->y =
                 view->resize_start_y + (view->resize_start_height - geo.height);
         }
@@ -747,6 +970,12 @@ static void handle_commit(struct wl_listener *listener, void *data) {
         view->last_geo_x = geo.x;
         view->last_geo_y = geo.y;
         view_update_scene_position(view);
+        if (!view->is_resizing && view->resize_finish_serial != 0 &&
+            (int32_t)(view->xdg_toplevel->base->current.configure_serial -
+                      view->resize_finish_serial) >= 0) {
+            view->resize_finish_serial = 0;
+            view->resize_anchor_edges = WLR_EDGE_NONE;
+        }
         return;
     }
 
@@ -834,8 +1063,6 @@ struct render_data {
     double scale;
     int base_x;
     int base_y;
-    int geo_x; /* Geometry offset to subtract from sx/sy */
-    int geo_y;
     float opacity; /* Overall opacity for map/unmap animation */
 };
 
@@ -870,15 +1097,10 @@ static void render_surface_iterator(struct wlr_surface *surface, int sx, int sy,
         buffer_scale = 1;
     }
 
-    /*
-     * Calculate destination position.
-     * Subtract the geometry offset because sx/sy from
-     * wlr_xdg_surface_for_each_surface are relative to the buffer origin, but
-     * we want positions relative to the window content origin (which is offset
-     * by geo.x/geo.y for CSD windows).
-     */
-    int dst_x = data->base_x + (int)round((sx - data->geo_x) * data->scale);
-    int dst_y = data->base_y + (int)round((sy - data->geo_y) * data->scale);
+    /* Iteration coordinates are relative to the root surface's buffer origin.
+     * base_x/base_y already account for the XDG geometry offset. */
+    int dst_x = data->base_x + (int)round(sx * data->scale);
+    int dst_y = data->base_y + (int)round(sy * data->scale);
 
     /* Calculate scaled destination size */
     int dst_width = (int)round(logical_width * data->scale);
@@ -1293,10 +1515,8 @@ void view_render(struct infinidesk_view *view, struct wlr_render_pass *pass,
     int centre_offset_x = (base_content_width - content_width) / 2;
     int centre_offset_y = (base_content_height - content_height) / 2;
 
-    int content_x = (int)round(screen_x) - (int)round(geo.x * combined_scale) +
-                    centre_offset_x;
-    int content_y = (int)round(screen_y) - (int)round(geo.y * combined_scale) +
-                    centre_offset_y;
+    int content_x = (int)round(screen_x) + centre_offset_x;
+    int content_y = (int)round(screen_y) + centre_offset_y;
 
     /* Skip rendering if content is too small to be visible */
     if (content_width <= 0 || content_height <= 0) {
@@ -1331,10 +1551,8 @@ void view_render(struct infinidesk_view *view, struct wlr_render_pass *pass,
         .pass = pass,
         .view = view,
         .scale = combined_scale,
-        .base_x = content_x,
-        .base_y = content_y,
-        .geo_x = geo.x,
-        .geo_y = geo.y,
+        .base_x = content_x - (int)round(geo.x * combined_scale),
+        .base_y = content_y - (int)round(geo.y * combined_scale),
         .opacity = anim_opacity,
     };
 
@@ -1349,9 +1567,10 @@ void view_render(struct infinidesk_view *view, struct wlr_render_pass *pass,
      * window texture.
      */
 
-    /* 1. Render all surfaces in the XDG surface tree (includes subsurfaces) */
-    wlr_xdg_surface_for_each_surface(xdg_surface, render_surface_iterator,
-                                     &data);
+    /* 1. Render the toplevel and its subsurfaces. Popups are drawn later,
+     * above every window, so they must not be drawn in this pass. */
+    wlr_surface_for_each_surface(xdg_surface->surface,
+                                 render_surface_iterator, &data);
 
     /* 2. Render corner masks over the content to create rounded corners */
     /* Note: Corner masks use fixed background colour, not affected by opacity
@@ -1403,8 +1622,6 @@ void view_render_popups(struct infinidesk_view *view,
         .scale = combined_scale,
         .base_x = content_x,
         .base_y = content_y,
-        .geo_x = geo.x,
-        .geo_y = geo.y,
         .opacity = 1.0f, /* Popups always fully opaque */
     };
 

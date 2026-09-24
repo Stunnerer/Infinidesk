@@ -39,6 +39,11 @@ static const char *DEFAULT_CONFIG =
     "startup = [\n"
     "]\n"
     "\n"
+    "[snapping]\n"
+    "# Distance in screen pixels; set either value to 0 to disable it.\n"
+    "screen_edges = 12\n"
+    "window_edges = 12\n"
+    "\n"
     "[keybinds]\n"
     "\"super + t\" = \"exec:kitty\"\n"
     "\"super + q\" = \"close_window\"\n"
@@ -663,11 +668,38 @@ static bool parse_float_value(const char *line, const char *key, float *value) {
     return true;
 }
 
+static bool parse_snap_distance(const char *line, const char *key, int *value) {
+    size_t key_len = strlen(key);
+    if (strncmp(line, key, key_len) != 0) {
+        return false;
+    }
+
+    char *p = skip_whitespace((char *)line + key_len);
+    if (*p != '=') {
+        return false;
+    }
+    p = skip_whitespace(p + 1);
+    char *end;
+    errno = 0;
+    long distance = strtol(p, &end, 10);
+    bool has_digits = end != p;
+    end = skip_whitespace(end);
+    if (!has_digits || errno != 0 || distance < 0 || distance > 1000 ||
+        (*end != '\0' && *end != '#')) {
+        wlr_log(WLR_ERROR, "Config: invalid %s (expected 0..1000)", key);
+        return true;
+    }
+    *value = (int)distance;
+    return true;
+}
+
 bool config_load(struct infinidesk_config *config) {
     memset(config, 0, sizeof(*config));
 
     /* Set defaults */
     config->scale = 1.0f;
+    config->snap_screen_px = 12;
+    config->snap_window_px = 12;
 
     char *path = get_config_path();
     if (!path) {
@@ -694,6 +726,7 @@ bool config_load(struct infinidesk_config *config) {
 
     /* First pass: parse simple key-value pairs */
     char line[MAX_LINE_LENGTH];
+    bool in_snapping = false;
     while (fgets(line, sizeof(line), f)) {
         char *p = skip_whitespace(line);
 
@@ -703,6 +736,20 @@ bool config_load(struct infinidesk_config *config) {
         }
 
         trim_trailing(p);
+
+        if (*p == '[') {
+            in_snapping = strcmp(p, "[snapping]") == 0;
+            continue;
+        }
+
+        if (in_snapping) {
+            if (parse_snap_distance(p, "screen_edges",
+                                    &config->snap_screen_px) ||
+                parse_snap_distance(p, "window_edges",
+                                    &config->snap_window_px)) {
+                continue;
+            }
+        }
 
         /* Parse scale */
         float scale_value;
