@@ -98,6 +98,8 @@ struct infinidesk_server {
     enum infinidesk_cursor_mode cursor_mode;
     struct infinidesk_view *grabbed_view;
     uint32_t pan_button; /* Button holding a pointer-driven canvas pan */
+    bool super_left_consumed;
+    bool super_right_consumed;
     double grab_x, grab_y; /* Cursor position at grab start */
     uint32_t resize_edges; /* For resize operations */
     bool

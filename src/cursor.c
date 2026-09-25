@@ -159,6 +159,8 @@ void cursor_init(struct infinidesk_server *server) {
     server->cursor_mode = INFINIDESK_CURSOR_PASSTHROUGH;
     server->grabbed_view = NULL;
     server->pan_button = 0;
+    server->super_left_consumed = false;
+    server->super_right_consumed = false;
     server->super_pressed = false;
     server->scroll_panning = false;
     server->scroll_pan_timer = NULL;
@@ -217,14 +219,26 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
         wl_container_of(listener, server, cursor_button);
     struct wlr_pointer_button_event *event = data;
 
+    bool *consumed = NULL;
+    if (event->button == BTN_LEFT) {
+        consumed = &server->super_left_consumed;
+    } else if (event->button == BTN_RIGHT) {
+        consumed = &server->super_right_consumed;
+    }
+    bool suppress_client_event = false;
+    if (consumed) {
+        if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
+            *consumed = server->super_pressed;
+            suppress_client_event = *consumed;
+        } else {
+            suppress_client_event = *consumed;
+            *consumed = false;
+        }
+    }
+
     if (server->cursor_mode == INFINIDESK_CURSOR_PAN &&
         event->state == WL_POINTER_BUTTON_STATE_RELEASED &&
         event->button == server->pan_button) {
-        if (event->button == BTN_RIGHT) {
-            /* Super+right press is forwarded below; balance it on release. */
-            wlr_seat_pointer_notify_button(server->seat, event->time_msec,
-                                           event->button, event->state);
-        }
         canvas_pan_end(&server->canvas);
         cursor_reset_mode(server);
         return;
@@ -273,9 +287,11 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
         }
     }
 
-    /* Notify the seat of the button event */
-    wlr_seat_pointer_notify_button(server->seat, event->time_msec,
-                                   event->button, event->state);
+    /* Compositor shortcuts keep both press and release from clients. */
+    if (!suppress_client_event) {
+        wlr_seat_pointer_notify_button(server->seat, event->time_msec,
+                                       event->button, event->state);
+    }
 
     if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
         /* Button pressed */
