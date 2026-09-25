@@ -170,6 +170,12 @@ void handle_new_xdg_popup(struct wl_listener *listener, void *data) {
 
     wlr_log(WLR_DEBUG, "New XDG popup");
 
+    /* Layer-shell popups have no XDG parent. Their layer surface attaches
+     * them through its own new_popup handler. */
+    if (!xdg_popup->parent) {
+        return;
+    }
+
     /*
      * Popups need to be attached to the scene graph.
      * We find the parent surface and create the popup in its scene tree.

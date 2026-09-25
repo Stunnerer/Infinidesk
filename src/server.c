@@ -484,11 +484,10 @@ uint32_t server_view_edge_at(struct infinidesk_server *server, double lx,
             continue;
         }
 
-        /* Check if cursor is INSIDE the window (not on edge) */
+        /* A frontmost window covers resize zones of windows below it. */
         if (lx >= render_x && lx < render_x + render_width && ly >= render_y &&
             ly < render_y + render_height) {
-            /* Cursor is inside the window, not on an edge */
-            continue;
+            return WLR_EDGE_NONE;
         }
 
         /*

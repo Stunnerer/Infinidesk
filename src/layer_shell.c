@@ -481,10 +481,24 @@ layer_surface_at(struct infinidesk_output *output, double ox, double oy,
             double lx = ox - layer->scene_tree->node.x;
             double ly = oy - layer->scene_tree->node.y;
 
-            /* Use wlroots helper to find surface at coordinates */
+            struct wlr_surface *found =
+                wlr_layer_surface_v1_popup_surface_at(layer->layer_surface,
+                                                      lx, ly, sx, sy);
+            if (found) {
+                *surface = found;
+                return layer;
+            }
+        }
+
+        wl_list_for_each(layer, &output->layer_surfaces[layer_idx], link) {
+            if (!layer->layer_surface->surface->mapped) {
+                continue;
+            }
+
+            double lx = ox - layer->scene_tree->node.x;
+            double ly = oy - layer->scene_tree->node.y;
             struct wlr_surface *found = wlr_layer_surface_v1_surface_at(
                 layer->layer_surface, lx, ly, sx, sy);
-
             if (found) {
                 *surface = found;
                 return layer;

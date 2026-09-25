@@ -690,7 +690,8 @@ static void render_layer_surfaces(struct infinidesk_output *output,
                                   struct wlr_render_pass *pass,
                                   enum zwlr_layer_shell_v1_layer layer) {
     struct infinidesk_layer_surface *layer_surface;
-    wl_list_for_each(layer_surface, &output->layer_surfaces[layer], link) {
+    wl_list_for_each_reverse(layer_surface, &output->layer_surfaces[layer],
+                             link) {
         if (!layer_surface->layer_surface->surface->mapped) {
             continue;
         }
@@ -706,6 +707,25 @@ static void render_layer_surfaces(struct infinidesk_output *output,
                                               render_layer_surface_iterator,
                                               &rdata);
     }
+
+    /* Popups sit above the layer surfaces in the same layer. */
+    wl_list_for_each_reverse(layer_surface, &output->layer_surfaces[layer],
+                             link) {
+        if (!layer_surface->layer_surface->surface->mapped) {
+            continue;
+        }
+
+        struct layer_render_data rdata = {
+            .pass = pass,
+            .x = layer_surface->scene_tree->node.x,
+            .y = layer_surface->scene_tree->node.y,
+            .output_scale = output->wlr_output->scale,
+        };
+
+        wlr_layer_surface_v1_for_each_popup_surface(
+            layer_surface->layer_surface, render_layer_surface_iterator,
+            &rdata);
+    }
 }
 
 /*
@@ -718,6 +738,9 @@ static void send_layer_frame_done(struct infinidesk_output *output,
         wl_list_for_each(layer_surface, &output->layer_surfaces[layer], link) {
             if (layer_surface->layer_surface->surface->mapped) {
                 wlr_layer_surface_v1_for_each_surface(
+                    layer_surface->layer_surface, send_frame_done_iterator,
+                    now);
+                wlr_layer_surface_v1_for_each_popup_surface(
                     layer_surface->layer_surface, send_frame_done_iterator,
                     now);
             }

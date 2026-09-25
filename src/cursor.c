@@ -102,6 +102,18 @@ static bool cursor_over_popup(struct infinidesk_server *server) {
                           wlr_surface_get_root_surface(surface));
 }
 
+static bool cursor_over_layer_surface(struct infinidesk_server *server) {
+    struct infinidesk_output *output = output_get_primary(server);
+    if (!output) {
+        return false;
+    }
+
+    struct wlr_surface *surface = NULL;
+    double sx, sy;
+    return layer_surface_at(output, server->cursor->x, server->cursor->y,
+                            &surface, &sx, &sy) != NULL;
+}
+
 void cursor_init(struct infinidesk_server *server) {
     /* Create the cursor */
     server->cursor = wlr_cursor_create();
@@ -219,6 +231,11 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
         wl_container_of(listener, server, cursor_button);
     struct wlr_pointer_button_event *event = data;
 
+    /* A popup or layer surface may have appeared without pointer motion. */
+    if (server->cursor_mode == INFINIDESK_CURSOR_PASSTHROUGH) {
+        cursor_process_motion(server, event->time_msec);
+    }
+
     bool *consumed = NULL;
     if (event->button == BTN_LEFT) {
         consumed = &server->super_left_consumed;
@@ -262,12 +279,12 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
          */
         if (event->button == BTN_LEFT) {
             struct infinidesk_view *edge_view = NULL;
-            uint32_t edges = cursor_over_popup(server)
-                                 ? WLR_EDGE_NONE
-                                 : server_view_edge_at(server,
-                                                       server->cursor->x,
-                                                       server->cursor->y,
-                                                       &edge_view);
+            uint32_t edges = WLR_EDGE_NONE;
+            if (!cursor_over_layer_surface(server) &&
+                !cursor_over_popup(server)) {
+                edges = server_view_edge_at(server, server->cursor->x,
+                                            server->cursor->y, &edge_view);
+            }
 
             if (edges != WLR_EDGE_NONE && edge_view) {
                 wlr_log(WLR_DEBUG, "Beginning edge resize (edges=0x%x)", edges);
@@ -647,27 +664,6 @@ void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
     }
 
     /*
-     * Check if cursor is near a window edge for resizing.
-     * This takes priority over normal view hover.
-     */
-    struct infinidesk_view *edge_view = NULL;
-    uint32_t edges = cursor_over_popup(server)
-                         ? WLR_EDGE_NONE
-                         : server_view_edge_at(server, server->cursor->x,
-                                               server->cursor->y, &edge_view);
-
-    if (edges != WLR_EDGE_NONE && edge_view) {
-        /* Cursor is on a resize edge - show resize cursor */
-        const char *cursor_name = wlr_xcursor_get_resize_name(edges);
-        wlr_cursor_set_xcursor(server->cursor, server->xcursor_manager,
-                               cursor_name);
-
-        /* Clear pointer focus since we're on an edge, not a surface */
-        wlr_seat_pointer_clear_focus(server->seat);
-        return;
-    }
-
-    /*
      * Passthrough mode: update pointer focus, cursor image, and keyboard focus.
      * Implements focus-follows-mouse behaviour.
      *
@@ -692,6 +688,21 @@ void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
                                            layer_sy);
             return;
         }
+    }
+
+    /* Resize zones belong below layer surfaces in the rendered stack. */
+    struct infinidesk_view *edge_view = NULL;
+    uint32_t edges = cursor_over_popup(server)
+                         ? WLR_EDGE_NONE
+                         : server_view_edge_at(server, server->cursor->x,
+                                               server->cursor->y, &edge_view);
+
+    if (edges != WLR_EDGE_NONE && edge_view) {
+        const char *cursor_name = wlr_xcursor_get_resize_name(edges);
+        wlr_cursor_set_xcursor(server->cursor, server->xcursor_manager,
+                               cursor_name);
+        wlr_seat_pointer_clear_focus(server->seat);
+        return;
     }
 
     double sx, sy;
