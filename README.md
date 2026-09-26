@@ -105,3 +105,33 @@ selected; text sent to applications still follows the selected layout.
 Press `Super+0` to reset canvas zoom to 100% around the pointer. For an
 existing config with a `[keybinds]` section, add
 `"super + 0" = "reset_zoom"` to enable this shortcut.
+
+## Configuration and verification
+
+The config path is `$XDG_CONFIG_HOME/infinidesk/infinidesk.toml`, or
+`~/.config/infinidesk/infinidesk.toml` when `XDG_CONFIG_HOME` is unset.
+The root `scale` setting accepts finite values from `0.5` to `4.0`.
+Invalid scale values keep the default of `1.0`. If loading the file fails,
+built-in shortcuts remain available. New configs use `Super+Return` for the
+terminal; existing configured shortcuts are preserved.
+
+Shortcuts match their specified modifiers exactly, ignoring Caps Lock and
+Num Lock. `Alt+Shift+Tab` cycles backwards when `Alt+Tab` is configured as
+`window_switcher`; Escape cancels the switcher. Only mapped windows participate.
+`Super+Q` closes the window with keyboard focus. Gathering windows centers the
+result on the active output and separates overlapping windows.
+
+Build and run the regression tests with installed wlroots 0.18 dependencies:
+
+```sh
+meson setup build  # once
+meson compile -C build
+meson test -C build --print-errorlogs
+```
+
+The tests use a temporary config, a headless Pixman renderer, and an isolated
+Wayland client. They cover malformed configuration, canvas coordinates, input
+regions, drawing history, window switching, popup repositioning, and output
+removal with live client surfaces. The environment must allow local Unix socket
+credentials. They do not replace interactive checks on actual displays; see
+[review notes](REVIEW.md).
