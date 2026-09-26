@@ -121,20 +121,7 @@ void keyboard_handle_key(struct wl_listener *listener, void *data) {
         keyboard->consumed_keys[event->keycode] = false;
     }
     if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-        /* XKB handles layout switching itself. Consume the triggering key
-         * before resolving physical bindings so clients cannot interpret it
-         * as a modified space (or another layout-switching key). */
-        for (int i = 0; i < nsyms && !handled; i++) {
-            switch (syms[i]) {
-            case XKB_KEY_ISO_Next_Group:
-            case XKB_KEY_ISO_Prev_Group:
-            case XKB_KEY_ISO_First_Group:
-            case XKB_KEY_ISO_Last_Group:
-                handled = true;
-                break;
-            }
-        }
-        if (!handled && keyboard->binding_keymap) {
+        if (keyboard->binding_keymap) {
             xkb_level_index_t levels = xkb_keymap_num_levels_for_key(
                 keyboard->binding_keymap, keycode, 0);
             /* Level zero is the physical key; level one also permits binds
@@ -157,7 +144,7 @@ void keyboard_handle_key(struct wl_listener *listener, void *data) {
                     }
                 }
             }
-        } else if (!handled) {
+        } else {
             for (int i = 0; i < nsyms; i++) {
                 if (keyboard_handle_keybinding(server, modifiers, syms[i])) {
                     handled = true;

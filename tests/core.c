@@ -131,7 +131,6 @@ int main(int argc, char **argv) {
     }
     /* Physical US bindings must work while applications use Russian. */
     setenv("XKB_DEFAULT_LAYOUT", "us,ru", 1);
-    setenv("XKB_DEFAULT_OPTIONS", "grp:win_space_toggle", 1);
     struct wlr_keyboard keyboard;
     static const struct wlr_keyboard_impl keyboard_impl = {.name =
                                                                "review-test"};
@@ -171,29 +170,6 @@ int main(int argc, char **argv) {
     assert(keyboard_handle_keybinding(
         &server, WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT, XKB_KEY_F1));
 
-    /* XKB layout switching must not leak its key, repeats or release. */
-    wlr_keyboard_notify_modifiers(&keyboard, logo, 0, 0, 0);
-    key = (struct wlr_keyboard_key_event){
-        .keycode = KEY_SPACE,
-        .state = WL_KEYBOARD_KEY_STATE_PRESSED,
-        .update_state = true};
-    assert(xkb_state_key_get_one_sym(keyboard.xkb_state, KEY_SPACE + 8) ==
-           XKB_KEY_ISO_Next_Group);
-    wlr_keyboard_notify_key(&keyboard, &key);
-    assert(wrapper->consumed_keys[KEY_SPACE]);
-    assert(keyboard.modifiers.group == 1);
-    wlr_keyboard_notify_key(&keyboard, &key);
-    assert(wrapper->consumed_keys[KEY_SPACE]);
-    /* Release Super first: the space release must still be consumed. */
-    wlr_keyboard_notify_modifiers(&keyboard, 0, 0, 0, 1);
-    key.state = WL_KEYBOARD_KEY_STATE_RELEASED;
-    wlr_keyboard_notify_key(&keyboard, &key);
-    assert(!wrapper->consumed_keys[KEY_SPACE]);
-    key.state = WL_KEYBOARD_KEY_STATE_PRESSED;
-    wlr_keyboard_notify_key(&keyboard, &key);
-    assert(!wrapper->consumed_keys[KEY_SPACE]);
-    key.state = WL_KEYBOARD_KEY_STATE_RELEASED;
-    wlr_keyboard_notify_key(&keyboard, &key);
     wlr_keyboard_finish(&keyboard);
     assert(wl_list_empty(&server.keyboards) && !server.super_pressed);
 
