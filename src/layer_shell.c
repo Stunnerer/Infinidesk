@@ -18,10 +18,12 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 
+#include "infinidesk/keyboard.h"
 #include "infinidesk/layer_shell.h"
 #include "infinidesk/output.h"
 #include "infinidesk/server.h"
 #include "infinidesk/view.h"
+#include "infinidesk/xdg_shell.h"
 
 /* Forward declarations */
 static void handle_layer_surface_map(struct wl_listener *listener, void *data);
@@ -63,7 +65,7 @@ void handle_new_layer_surface(struct wl_listener *listener, void *data) {
      * The protocol requires us to assign an output before returning.
      */
     if (!layer_surface->output) {
-        struct infinidesk_output *primary = output_get_primary(server);
+        struct infinidesk_output *primary = output_get_active(server);
         if (!primary) {
             wlr_log(WLR_ERROR, "No output available for layer surface");
             wlr_layer_surface_v1_destroy(layer_surface);
@@ -175,17 +177,11 @@ void handle_new_layer_surface(struct wl_listener *listener, void *data) {
  */
 static void layer_surface_focus(struct infinidesk_layer_surface *layer) {
     struct infinidesk_server *server = layer->server;
-    struct wlr_seat *seat = server->seat;
     struct wlr_surface *surface = layer->layer_surface->surface;
 
     server->focused_layer = layer;
 
-    struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
-    if (keyboard) {
-        wlr_seat_keyboard_notify_enter(seat, surface, keyboard->keycodes,
-                                       keyboard->num_keycodes,
-                                       &keyboard->modifiers);
-    }
+    keyboard_enter(server, surface);
 
     wlr_log(WLR_DEBUG, "Focused layer surface %p (keyboard_interactive=%d)",
             (void *)layer, layer->layer_surface->current.keyboard_interactive);
@@ -203,6 +199,22 @@ static void layer_surface_unfocus(struct infinidesk_layer_surface *layer) {
     }
 
     server->focused_layer = NULL;
+    struct infinidesk_output *output;
+    wl_list_for_each(output, &server->outputs, link) {
+        if (output->destroying)
+            continue;
+        for (int i = LAYER_SHELL_LAYER_COUNT - 1; i >= 0; i--) {
+            struct infinidesk_layer_surface *other;
+            wl_list_for_each(other, &output->layer_surfaces[i], link) {
+                if (other != layer && other->layer_surface->surface->mapped &&
+                    other->layer_surface->current.keyboard_interactive ==
+                        ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE) {
+                    layer_surface_focus(other);
+                    return;
+                }
+            }
+        }
+    }
 
     /*
      * Refocus the topmost mapped view, if any.
@@ -305,11 +317,9 @@ static void handle_layer_surface_commit(struct wl_listener *listener,
          */
         enum zwlr_layer_shell_v1_layer current_layer =
             layer_surface->current.layer;
-        enum zwlr_layer_shell_v1_layer pending_layer =
-            layer_surface->pending.layer;
-
-        if (current_layer != pending_layer &&
-            current_layer < LAYER_SHELL_LAYER_COUNT) {
+        if (current_layer < LAYER_SHELL_LAYER_COUNT &&
+            layer->scene_tree->node.parent !=
+                layer->output->layer_trees[current_layer]) {
             wl_list_remove(&layer->link);
             struct wlr_scene_tree *new_parent =
                 layer->output->layer_trees[current_layer];
@@ -368,7 +378,8 @@ static void handle_layer_surface_commit(struct wl_listener *listener,
         enum zwlr_layer_surface_v1_keyboard_interactivity ki =
             layer_surface->current.keyboard_interactive;
 
-        if (ki == ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE) {
+        if (ki == ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE &&
+            layer_surface->surface->mapped) {
             layer_surface_focus(layer);
         } else if (layer->server->focused_layer == layer) {
             layer_surface_unfocus(layer);
@@ -384,21 +395,12 @@ static void handle_layer_surface_new_popup(struct wl_listener *listener,
 
     wlr_log(WLR_DEBUG, "New popup for layer surface %p", (void *)layer);
 
-    /*
-     * Create the popup in the layer surface's scene tree.
-     * This is similar to how we handle XDG shell popups.
-     */
-    struct wlr_scene_tree *popup_tree =
-        wlr_scene_xdg_surface_create(layer->scene_tree, popup->base);
-    if (!popup_tree) {
-        wlr_log(WLR_ERROR, "Failed to create scene tree for layer popup");
-        return;
-    }
-
-    popup->base->data = popup_tree;
+    xdg_popup_create(layer->scene_tree, popup);
 }
 
 void layer_shell_arrange(struct infinidesk_output *output) {
+    if (output->destroying)
+        return;
     /*
      * Arrange all layer surfaces on this output.
      *
@@ -425,32 +427,33 @@ void layer_shell_arrange(struct infinidesk_output *output) {
      * Background and overlay layers are processed but typically don't claim
      * exclusive zones.
      */
-    for (int layer_idx = 0; layer_idx < LAYER_SHELL_LAYER_COUNT; layer_idx++) {
-        struct infinidesk_layer_surface *layer;
-        wl_list_for_each(layer, &output->layer_surfaces[layer_idx], link) {
-            struct wlr_layer_surface_v1 *layer_surface = layer->layer_surface;
-
-            /*
-             * Use the wlroots helper to configure the layer surface.
-             * This calculates the surface position based on anchors and
-             * margins, and updates usable_area for exclusive zones.
-             */
-            wlr_scene_layer_surface_v1_configure(layer->scene_layer_surface,
-                                                 &full_area, &usable_area);
-
-            wlr_log(WLR_DEBUG,
-                    "Arranged layer surface: layer=%d, pos=(%d,%d), "
-                    "size=%dx%d, exclusive=%d",
-                    layer_idx, layer->scene_tree->node.x,
-                    layer->scene_tree->node.y,
-                    layer_surface->current.actual_width,
-                    layer_surface->current.actual_height,
-                    layer_surface->current.exclusive_zone);
+    /* Reserve exclusive zones before positioning non-exclusive surfaces. */
+    for (int exclusive = 1; exclusive >= 0; exclusive--) {
+        for (int layer_idx = LAYER_SHELL_LAYER_COUNT - 1; layer_idx >= 0;
+             layer_idx--) {
+            struct infinidesk_layer_surface *layer;
+            wl_list_for_each(layer, &output->layer_surfaces[layer_idx], link) {
+                struct wlr_layer_surface_v1 *surface = layer->layer_surface;
+                if (!surface->initialized ||
+                    (!surface->surface->mapped && !surface->initial_commit) ||
+                    (surface->current.exclusive_zone > 0) != (exclusive != 0))
+                    continue;
+                wlr_scene_layer_surface_v1_configure(layer->scene_layer_surface,
+                                                     &full_area, &usable_area);
+            }
         }
+    }
+
+    struct wlr_box layout_box;
+    output_get_box(output, &layout_box);
+    for (int i = 0; i < LAYER_SHELL_LAYER_COUNT; i++) {
+        wlr_scene_node_set_position(&output->layer_trees[i]->node, layout_box.x,
+                                    layout_box.y);
     }
 
     /* Store the usable area for window placement */
     output->usable_area = usable_area;
+    wlr_output_schedule_frame(output->wlr_output);
 
     wlr_log(WLR_DEBUG, "Output %s usable area: (%d,%d) %dx%d",
             output->wlr_output->name, usable_area.x, usable_area.y,
@@ -465,12 +468,22 @@ void layer_shell_get_usable_area(struct infinidesk_output *output,
 struct infinidesk_layer_surface *
 layer_surface_at(struct infinidesk_output *output, double ox, double oy,
                  struct wlr_surface **surface, double *sx, double *sy) {
+    double layout_x = ox, layout_y = oy;
+    wlr_output_layout_output_coords(output->server->output_layout,
+                                    output->wlr_output, &ox, &oy);
     /*
      * Search for a layer surface at the given output-local coordinates.
      * We search from overlay to background (top to bottom in z-order).
      */
     for (int layer_idx = LAYER_SHELL_LAYER_COUNT - 1; layer_idx >= 0;
          layer_idx--) {
+        if (layer_idx == ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
+            (server_view_at(output->server, layout_x, layout_y, surface, sx,
+                            sy) ||
+             server_view_edge_at(output->server, layout_x, layout_y, NULL))) {
+            *surface = NULL;
+            return NULL;
+        }
         struct infinidesk_layer_surface *layer;
         wl_list_for_each(layer, &output->layer_surfaces[layer_idx], link) {
             if (!layer->layer_surface->surface->mapped) {

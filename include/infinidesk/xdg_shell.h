@@ -13,6 +13,11 @@
 
 /* Forward declaration */
 struct infinidesk_server;
+struct wlr_scene_tree;
+struct wlr_xdg_popup;
+
+void xdg_popup_create(struct wlr_scene_tree *parent,
+                      struct wlr_xdg_popup *popup);
 
 /*
  * Initialise XDG shell handling for the server.

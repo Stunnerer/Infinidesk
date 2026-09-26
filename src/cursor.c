@@ -30,6 +30,7 @@
 #include "infinidesk/cursor.h"
 #include "infinidesk/drawing.h"
 #include "infinidesk/drawing_ui.h"
+#include "infinidesk/keyboard.h"
 #include "infinidesk/layer_shell.h"
 #include "infinidesk/output.h"
 #include "infinidesk/server.h"
@@ -73,7 +74,8 @@ static void cursor_scroll_pan(struct infinidesk_server *server,
 static bool cursor_over_content(struct infinidesk_server *server) {
     double sx, sy;
     struct wlr_surface *surface = NULL;
-    struct infinidesk_output *output = output_get_primary(server);
+    struct infinidesk_output *output =
+        output_at(server, server->cursor->x, server->cursor->y);
 
     if (output && layer_surface_at(output, server->cursor->x,
                                    server->cursor->y, &surface, &sx, &sy)) {
@@ -102,17 +104,6 @@ static bool cursor_over_popup(struct infinidesk_server *server) {
                           wlr_surface_get_root_surface(surface));
 }
 
-static bool cursor_over_layer_surface(struct infinidesk_server *server) {
-    struct infinidesk_output *output = output_get_primary(server);
-    if (!output) {
-        return false;
-    }
-
-    struct wlr_surface *surface = NULL;
-    double sx, sy;
-    return layer_surface_at(output, server->cursor->x, server->cursor->y,
-                            &surface, &sx, &sy) != NULL;
-}
 
 void cursor_init(struct infinidesk_server *server) {
     /* Create the cursor */
@@ -171,8 +162,7 @@ void cursor_init(struct infinidesk_server *server) {
     server->cursor_mode = INFINIDESK_CURSOR_PASSTHROUGH;
     server->grabbed_view = NULL;
     server->pan_button = 0;
-    server->super_left_consumed = false;
-    server->super_right_consumed = false;
+    memset(server->consumed_buttons, 0, sizeof(server->consumed_buttons));
     server->super_pressed = false;
     server->scroll_panning = false;
     server->scroll_pan_timer = NULL;
@@ -230,233 +220,129 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
     struct infinidesk_server *server =
         wl_container_of(listener, server, cursor_button);
     struct wlr_pointer_button_event *event = data;
+    bool pressed = event->state == WL_POINTER_BUTTON_STATE_PRESSED;
+    bool consumed =
+        event->button <= KEY_MAX && server->consumed_buttons[event->button];
 
-    /* A popup or layer surface may have appeared without pointer motion. */
-    if (server->cursor_mode == INFINIDESK_CURSOR_PASSTHROUGH) {
-        cursor_process_motion(server, event->time_msec);
-    }
-
-    bool *consumed = NULL;
-    if (event->button == BTN_LEFT) {
-        consumed = &server->super_left_consumed;
-    } else if (event->button == BTN_RIGHT) {
-        consumed = &server->super_right_consumed;
-    }
-    bool suppress_client_event = false;
-    if (consumed) {
-        if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
-            *consumed = server->super_pressed;
-            suppress_client_event = *consumed;
-        } else {
-            suppress_client_event = *consumed;
-            *consumed = false;
+    if (!pressed) {
+        if (event->button <= KEY_MAX) {
+            server->consumed_buttons[event->button] = false;
         }
-    }
-
-    if (server->cursor_mode == INFINIDESK_CURSOR_PAN &&
-        event->state == WL_POINTER_BUTTON_STATE_RELEASED &&
-        event->button == server->pan_button) {
-        canvas_pan_end(&server->canvas);
-        cursor_reset_mode(server);
+        if (event->button == server->grab_button) {
+            if (server->grabbed_view) {
+                view_move_end(server->grabbed_view);
+                view_resize_end(server->grabbed_view);
+            }
+            canvas_pan_end(&server->canvas);
+            drawing_stroke_end(&server->drawing);
+            cursor_reset_mode(server);
+            cursor_process_motion(server, event->time_msec);
+        }
+        if (!consumed) {
+            wlr_seat_pointer_notify_button(server->seat, event->time_msec,
+                                           event->button, event->state);
+        }
         return;
     }
 
-    if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
-        if (event->button == BTN_MIDDLE &&
-            server->cursor_mode == INFINIDESK_CURSOR_PASSTHROUGH &&
-            !cursor_over_content(server)) {
-            server->cursor_mode = INFINIDESK_CURSOR_PAN;
-            server->pan_button = BTN_MIDDLE;
-            canvas_pan_begin(&server->canvas, server->cursor->x,
-                             server->cursor->y);
-            return;
+    if (server->cursor_mode != INFINIDESK_CURSOR_PASSTHROUGH) {
+        consumed = true;
+        goto done;
+    }
+    cursor_process_motion(server, event->time_msec);
+
+    /* The drawing overlay is above every client surface. */
+    if (server->drawing.drawing_mode && event->button == BTN_LEFT) {
+        enum drawing_ui_button button = drawing_ui_get_button_at(
+            &server->drawing.ui_panel, server->cursor->x, server->cursor->y);
+        if (button != UI_BUTTON_NONE) {
+            drawing_ui_handle_click(&server->drawing.ui_panel, &server->drawing,
+                                    button);
+        } else {
+            double x, y;
+            screen_to_canvas(&server->canvas, server->cursor->x,
+                             server->cursor->y, &x, &y);
+            drawing_stroke_begin(&server->drawing, x, y);
+            server->cursor_mode = INFINIDESK_CURSOR_DRAW;
+            server->grab_button = event->button;
         }
-
-        /*
-         * Check if clicking on a resize edge before notifying the seat.
-         * We don't want to forward the button press to clients when
-         * initiating a compositor-level resize.
-         */
-        if (event->button == BTN_LEFT) {
-            struct infinidesk_view *edge_view = NULL;
-            uint32_t edges = WLR_EDGE_NONE;
-            if (!cursor_over_layer_surface(server) &&
-                !cursor_over_popup(server)) {
-                edges = server_view_edge_at(server, server->cursor->x,
-                                            server->cursor->y, &edge_view);
-            }
-
-            if (edges != WLR_EDGE_NONE && edge_view) {
-                wlr_log(WLR_DEBUG, "Beginning edge resize (edges=0x%x)", edges);
-                server->cursor_mode = INFINIDESK_CURSOR_RESIZE;
-                server->grabbed_view = edge_view;
-                server->resize_edges = edges;
-
-                double canvas_x, canvas_y;
-                screen_to_canvas(&server->canvas, server->cursor->x,
-                                 server->cursor->y, &canvas_x, &canvas_y);
-                view_resize_begin(edge_view, edges, canvas_x, canvas_y);
-
-                view_focus(edge_view);
-                view_raise(edge_view);
-                return;
-            }
-        }
+        consumed = true;
+        goto done;
     }
 
-    /* Compositor shortcuts keep both press and release from clients. */
-    if (!suppress_client_event) {
+    if ((server->super_pressed && event->button == BTN_RIGHT) ||
+        (event->button == BTN_MIDDLE && !cursor_over_content(server))) {
+        server->cursor_mode = INFINIDESK_CURSOR_PAN;
+        server->grab_button = server->pan_button = event->button;
+        canvas_pan_begin(&server->canvas, server->cursor->x, server->cursor->y);
+        consumed = true;
+        goto done;
+    }
+
+    struct infinidesk_output *output =
+        output_at(server, server->cursor->x, server->cursor->y);
+    struct wlr_surface *surface = NULL;
+    double sx, sy;
+    struct infinidesk_layer_surface *layer =
+        output ? layer_surface_at(output, server->cursor->x, server->cursor->y,
+                                  &surface, &sx, &sy)
+               : NULL;
+    if (layer) {
+        if (layer->layer_surface->current.keyboard_interactive ==
+                ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND &&
+            (!server->focused_layer ||
+             server->focused_layer->layer_surface->current
+                     .keyboard_interactive !=
+                 ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE)) {
+            server->focused_layer = layer;
+            keyboard_enter(server, layer->layer_surface->surface);
+        }
+        goto done;
+    }
+
+    if (server->focused_layer &&
+        server->focused_layer->layer_surface->current.keyboard_interactive ==
+            ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND) {
+        server->focused_layer = NULL;
+        wlr_seat_keyboard_clear_focus(server->seat);
+    }
+
+    struct infinidesk_view *view = server_view_at(
+        server, server->cursor->x, server->cursor->y, &surface, &sx, &sy);
+    struct infinidesk_view *edge_view = NULL;
+    uint32_t edges = cursor_over_popup(server)
+                         ? WLR_EDGE_NONE
+                         : server_view_edge_at(server, server->cursor->x,
+                                               server->cursor->y, &edge_view);
+    if (event->button == BTN_LEFT &&
+        (edges != WLR_EDGE_NONE || (server->super_pressed && view))) {
+        double x, y;
+        screen_to_canvas(&server->canvas, server->cursor->x, server->cursor->y,
+                         &x, &y);
+        if (edges != WLR_EDGE_NONE) {
+            view = edge_view;
+            view_resize_begin(view, edges, x, y);
+            server->cursor_mode = INFINIDESK_CURSOR_RESIZE;
+        } else {
+            view_move_begin(view, x, y);
+            server->cursor_mode = INFINIDESK_CURSOR_MOVE;
+        }
+        server->grabbed_view = view;
+        server->grab_button = event->button;
+        consumed = true;
+    }
+    if (view) {
+        view_focus(view);
+        view_raise(view);
+    }
+
+done:
+    if (event->button <= KEY_MAX) {
+        server->consumed_buttons[event->button] = consumed;
+    }
+    if (!consumed) {
         wlr_seat_pointer_notify_button(server->seat, event->time_msec,
                                        event->button, event->state);
-    }
-
-    if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
-        /* Button pressed */
-
-        /*
-         * Check if cursor is over a layer surface.
-         * Layer surfaces take priority over views for click handling.
-         */
-        struct infinidesk_output *btn_output = output_get_primary(server);
-        if (btn_output) {
-            double layer_sx, layer_sy;
-            struct wlr_surface *layer_srf = NULL;
-            struct infinidesk_layer_surface *layer = layer_surface_at(
-                btn_output, server->cursor->x, server->cursor->y, &layer_srf,
-                &layer_sx, &layer_sy);
-
-            if (layer && layer_srf) {
-                /*
-                 * Clicked on a layer surface. Grant keyboard focus if
-                 * it has ON_DEMAND keyboard interactivity.
-                 */
-                enum zwlr_layer_surface_v1_keyboard_interactivity ki =
-                    layer->layer_surface->current.keyboard_interactive;
-                if (ki ==
-                    ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND) {
-                    server->focused_layer = layer;
-                    struct wlr_keyboard *keyboard =
-                        wlr_seat_get_keyboard(server->seat);
-                    if (keyboard) {
-                        wlr_seat_keyboard_notify_enter(
-                            server->seat, layer->layer_surface->surface,
-                            keyboard->keycodes, keyboard->num_keycodes,
-                            &keyboard->modifiers);
-                    }
-                }
-                /* Button event already forwarded via notify_button above */
-                return;
-            }
-        }
-
-        /*
-         * Click was not on a layer surface. If an ON_DEMAND layer surface
-         * currently holds focus, release it so a view can regain focus.
-         */
-        if (server->focused_layer) {
-            enum zwlr_layer_surface_v1_keyboard_interactivity ki =
-                server->focused_layer->layer_surface->current
-                    .keyboard_interactive;
-            if (ki == ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND) {
-                server->focused_layer = NULL;
-            }
-        }
-
-        double sx, sy;
-        struct wlr_surface *surface = NULL;
-        struct infinidesk_view *view = server_view_at(
-            server, server->cursor->x, server->cursor->y, &surface, &sx, &sy);
-
-        /* Check if drawing mode is active */
-        if (server->drawing.drawing_mode) {
-            /* Check if cursor is over UI panel first */
-            enum drawing_ui_button button =
-                drawing_ui_get_button_at(&server->drawing.ui_panel,
-                                         server->cursor->x, server->cursor->y);
-
-            if (button != UI_BUTTON_NONE) {
-                if (event->button == BTN_LEFT) {
-                    /* Click on UI button */
-                    drawing_ui_handle_click(&server->drawing.ui_panel,
-                                            &server->drawing, button);
-                    wlr_log(WLR_DEBUG, "UI button clicked: %d", button);
-                    return;
-                }
-            }
-
-            if (event->button == BTN_LEFT) {
-                /* Left click in drawing mode (not on UI): Begin drawing stroke
-                 */
-                wlr_log(WLR_DEBUG, "Beginning drawing stroke");
-                server->cursor_mode = INFINIDESK_CURSOR_DRAW;
-
-                /* Convert cursor position to canvas coordinates */
-                double canvas_x, canvas_y;
-                screen_to_canvas(&server->canvas, server->cursor->x,
-                                 server->cursor->y, &canvas_x, &canvas_y);
-                drawing_stroke_begin(&server->drawing, canvas_x, canvas_y);
-                return;
-            }
-        }
-
-        /* Check for Super key modifier actions */
-        if (server->super_pressed) {
-            if (event->button == BTN_LEFT && view) {
-                /* Super + Left click: Begin window move */
-                wlr_log(WLR_DEBUG, "Beginning view move");
-                server->cursor_mode = INFINIDESK_CURSOR_MOVE;
-                server->grabbed_view = view;
-                server->grab_x = server->cursor->x;
-                server->grab_y = server->cursor->y;
-
-                /* Convert cursor position to canvas coordinates */
-                double canvas_x, canvas_y;
-                screen_to_canvas(&server->canvas, server->cursor->x,
-                                 server->cursor->y, &canvas_x, &canvas_y);
-                view_move_begin(view, canvas_x, canvas_y);
-
-                /* Focus and raise the view being moved */
-                view_focus(view);
-                view_raise(view);
-                return;
-            } else if (event->button == BTN_RIGHT) {
-                /* Super + Right click: Begin canvas pan */
-                wlr_log(WLR_DEBUG, "Beginning canvas pan");
-                server->cursor_mode = INFINIDESK_CURSOR_PAN;
-                server->pan_button = BTN_RIGHT;
-                canvas_pan_begin(&server->canvas, server->cursor->x,
-                                 server->cursor->y);
-                return;
-            }
-        }
-
-        /* Regular click - focus and raise the view if we clicked on one */
-        if (view) {
-            view_focus(view);
-            view_raise(view);
-        }
-
-    } else {
-        /* Button released */
-        if (server->cursor_mode == INFINIDESK_CURSOR_MOVE) {
-            /* End window move */
-            if (server->grabbed_view) {
-                view_move_end(server->grabbed_view);
-            }
-            cursor_reset_mode(server);
-
-        } else if (server->cursor_mode == INFINIDESK_CURSOR_RESIZE) {
-            /* End window resize */
-            if (server->grabbed_view) {
-                view_resize_end(server->grabbed_view);
-            }
-            cursor_reset_mode(server);
-
-        } else if (server->cursor_mode == INFINIDESK_CURSOR_DRAW) {
-            /* End drawing stroke */
-            drawing_stroke_end(&server->drawing);
-            cursor_reset_mode(server);
-        }
     }
 }
 
@@ -464,6 +350,11 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
     struct infinidesk_server *server =
         wl_container_of(listener, server, cursor_axis);
     struct wlr_pointer_axis_event *event = data;
+
+    if (server->cursor_mode == INFINIDESK_CURSOR_PASSTHROUGH &&
+        !server->scroll_panning) {
+        cursor_process_motion(server, event->time_msec);
+    }
 
     /* Super + two-finger scroll pans even over an application. */
     if (server->super_pressed &&
@@ -474,7 +365,8 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
 
     /* Super + mouse wheel zooms the canvas. */
     if (server->super_pressed) {
-        if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
+        if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL &&
+            event->delta != 0) {
             double zoom_step = pow(ZOOM_SCROLL_FACTOR, server->wheel_speed);
             double factor = (event->delta < 0) ? zoom_step
                                                : (1.0 / zoom_step);
@@ -490,7 +382,7 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
      * what's under the cursor. This prevents windows from stealing the
      * gesture mid-pan.
      */
-    if (server->scroll_panning) {
+    if (server->scroll_panning || server->drawing.drawing_mode) {
         cursor_scroll_pan(server, event);
         return;
     }
@@ -501,7 +393,8 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
      */
 
     /* Layer surfaces take priority over views */
-    struct infinidesk_output *axis_output = output_get_primary(server);
+    struct infinidesk_output *axis_output =
+        output_at(server, server->cursor->x, server->cursor->y);
     if (axis_output) {
         double layer_sx, layer_sy;
         struct wlr_surface *layer_srf = NULL;
@@ -544,6 +437,7 @@ void cursor_handle_pinch_begin(struct wl_listener *listener, void *data) {
         return;
     }
 
+    server->canvas.snap_anim_active = false;
     server->pinch_active = true;
     server->pinch_pointer = event->pointer;
     server->pinch_start_scale = server->canvas.scale;
@@ -657,10 +551,26 @@ void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
 
     /* Passthrough mode: update focus and cursor image */
 
-    /* Update UI hover state if drawing mode is active */
+    /* Keep overlay input geometry current even before the next output frame. */
     if (server->drawing.drawing_mode) {
+        struct infinidesk_output *output = output_get_active(server);
+        if (output) {
+            struct wlr_box box;
+            output_get_box(output, &box);
+            drawing_ui_init(&server->drawing.ui_panel, box.width, box.height);
+            server->drawing.ui_panel.x += box.x;
+            server->drawing.ui_panel.y += box.y;
+        }
         drawing_ui_update_hover(&server->drawing.ui_panel, server->cursor->x,
                                 server->cursor->y);
+    }
+
+    if (server->drawing.drawing_mode) {
+        wlr_seat_pointer_clear_focus(server->seat);
+        wlr_cursor_set_xcursor(server->cursor, server->xcursor_manager,
+                               "crosshair");
+        output_schedule_frames(server);
+        return;
     }
 
     /*
@@ -672,7 +582,8 @@ void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
      */
 
     /* Check if cursor is over a layer surface first */
-    struct infinidesk_output *cursor_output = output_get_primary(server);
+    struct infinidesk_output *cursor_output =
+        output_at(server, server->cursor->x, server->cursor->y);
     if (cursor_output) {
         double layer_sx, layer_sy;
         struct wlr_surface *layer_srf = NULL;
@@ -727,7 +638,8 @@ void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
          * while the user is navigating the canvas.
          * Also skip if an exclusive layer surface holds keyboard focus.
          */
-        if (view && !server->scroll_panning && !server->focused_layer) {
+        if (view && !server->scroll_panning && !server->focused_layer &&
+            !server->switcher.active && !server->canvas.snap_anim_active) {
             view_focus(view);
         }
     } else {
@@ -740,6 +652,7 @@ void cursor_reset_mode(struct infinidesk_server *server) {
     server->cursor_mode = INFINIDESK_CURSOR_PASSTHROUGH;
     server->grabbed_view = NULL;
     server->pan_button = 0;
+    server->grab_button = 0;
 
     wlr_log(WLR_DEBUG, "Cursor mode reset to passthrough");
 }

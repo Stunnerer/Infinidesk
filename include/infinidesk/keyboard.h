@@ -9,6 +9,7 @@
 #ifndef INFINIDESK_KEYBOARD_H
 #define INFINIDESK_KEYBOARD_H
 
+#include <linux/input-event-codes.h>
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_keyboard.h>
 
@@ -24,6 +25,8 @@ struct infinidesk_keyboard {
     struct wlr_keyboard *wlr_keyboard;
     struct xkb_keymap *binding_keymap; /* US physical key positions */
 
+    bool consumed_keys[KEY_MAX + 1];
+
     struct wl_listener key;
     struct wl_listener modifiers;
     struct wl_listener destroy;
@@ -32,6 +35,10 @@ struct infinidesk_keyboard {
 /*
  * Create and configure a keyboard for the given device.
  */
+struct wlr_surface;
+void keyboard_enter(struct infinidesk_server *server,
+                    struct wlr_surface *surface);
+
 void keyboard_create(struct infinidesk_server *server,
                      struct wlr_keyboard *wlr_keyboard);
 

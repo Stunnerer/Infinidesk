@@ -15,7 +15,9 @@
 #include <wlr/util/log.h>
 
 #include "infinidesk/canvas.h"
+#include "infinidesk/cursor.h"
 #include "infinidesk/drawing.h"
+#include "infinidesk/output.h"
 #include "infinidesk/server.h"
 
 /* Drawing configuration */
@@ -61,10 +63,12 @@ void drawing_finish(struct drawing_layer *drawing) {
 
 void drawing_toggle_mode(struct drawing_layer *drawing) {
     drawing->drawing_mode = !drawing->drawing_mode;
+    output_schedule_frames(drawing->server);
 
     /* If disabling drawing mode while drawing, end the current stroke */
     if (!drawing->drawing_mode && drawing->is_drawing) {
         drawing_stroke_end(drawing);
+        cursor_reset_mode(drawing->server);
     }
 
     wlr_log(WLR_INFO, "Drawing mode %s",
@@ -72,6 +76,9 @@ void drawing_toggle_mode(struct drawing_layer *drawing) {
 }
 
 void drawing_clear_all(struct drawing_layer *drawing) {
+    drawing_stroke_destroy(drawing->current_stroke);
+    drawing->current_stroke = NULL;
+    output_schedule_frames(drawing->server);
     struct drawing_stroke *stroke, *tmp_stroke;
 
     wl_list_for_each_safe(stroke, tmp_stroke, &drawing->strokes, link) {
@@ -90,6 +97,7 @@ void drawing_clear_all(struct drawing_layer *drawing) {
 }
 
 void drawing_undo_last(struct drawing_layer *drawing) {
+    output_schedule_frames(drawing->server);
     /* If currently drawing, end and remove that stroke */
     if (drawing->is_drawing && drawing->current_stroke) {
         drawing_stroke_destroy(drawing->current_stroke);
@@ -117,6 +125,7 @@ void drawing_undo_last(struct drawing_layer *drawing) {
 }
 
 void drawing_redo_last(struct drawing_layer *drawing) {
+    output_schedule_frames(drawing->server);
     if (wl_list_empty(&drawing->redo_stack)) {
         wlr_log(WLR_DEBUG, "No strokes to redo");
         return;
@@ -133,7 +142,7 @@ void drawing_redo_last(struct drawing_layer *drawing) {
 
 void drawing_stroke_begin(struct drawing_layer *drawing, double canvas_x,
                           double canvas_y) {
-    if (!drawing->drawing_mode) {
+    if (!drawing->drawing_mode || drawing->is_drawing) {
         return;
     }
 
@@ -161,6 +170,7 @@ void drawing_stroke_begin(struct drawing_layer *drawing, double canvas_x,
     drawing->is_drawing = true;
     drawing->last_canvas_x = canvas_x;
     drawing->last_canvas_y = canvas_y;
+    output_schedule_frames(drawing->server);
 
     wlr_log(WLR_DEBUG, "Started new stroke at (%.2f, %.2f)", canvas_x,
             canvas_y);
@@ -191,6 +201,7 @@ void drawing_stroke_add_point(struct drawing_layer *drawing, double canvas_x,
 
     drawing->last_canvas_x = canvas_x;
     drawing->last_canvas_y = canvas_y;
+    output_schedule_frames(drawing->server);
 }
 
 void drawing_stroke_end(struct drawing_layer *drawing) {
@@ -225,140 +236,93 @@ void drawing_stroke_end(struct drawing_layer *drawing) {
 
     drawing->current_stroke = NULL;
     drawing->is_drawing = false;
+    output_schedule_frames(drawing->server);
+}
+
+/* Clip before rasterizing so offscreen strokes cannot generate unbounded work.
+ */
+static bool clip_segment(double *x1, double *y1, double *x2, double *y2,
+                         double width, double height, double margin) {
+    double dx = *x2 - *x1, dy = *y2 - *y1;
+    double p[] = {-dx, dx, -dy, dy};
+    double q[] = {*x1 + margin, width + margin - *x1, *y1 + margin,
+                  height + margin - *y1};
+    double start = 0, end = 1;
+    for (int i = 0; i < 4; i++) {
+        if (p[i] == 0) {
+            if (q[i] < 0)
+                return false;
+            continue;
+        }
+        double t = q[i] / p[i];
+        if (p[i] < 0)
+            start = fmax(start, t);
+        else
+            end = fmin(end, t);
+        if (start > end)
+            return false;
+    }
+    *x2 = *x1 + end * dx;
+    *y2 = *y1 + end * dy;
+    *x1 += start * dx;
+    *y1 += start * dy;
+    return true;
+}
+
+static void render_stroke(struct drawing_layer *drawing,
+                          struct drawing_stroke *stroke,
+                          struct wlr_render_pass *pass, int width, int height,
+                          float output_scale, int output_x, int output_y) {
+    double line_width =
+        DRAWING_LINE_WIDTH * drawing->server->canvas.scale * output_scale;
+    struct drawing_point *prev = NULL, *point;
+    wl_list_for_each(point, &stroke->points, link) {
+        if (prev) {
+            double x1, y1, x2, y2;
+            canvas_to_screen(&drawing->server->canvas, prev->x, prev->y, &x1,
+                             &y1);
+            canvas_to_screen(&drawing->server->canvas, point->x, point->y, &x2,
+                             &y2);
+            x1 = (x1 - output_x) * output_scale;
+            y1 = (y1 - output_y) * output_scale;
+            x2 = (x2 - output_x) * output_scale;
+            y2 = (y2 - output_y) * output_scale;
+            if (isfinite(x1) && isfinite(y1) && isfinite(x2) && isfinite(y2) &&
+                clip_segment(&x1, &y1, &x2, &y2, width, height, line_width)) {
+                double dx = x2 - x1, dy = y2 - y1;
+                int segments = (int)(hypot(dx, dy) / 2.0) + 1;
+                for (int i = 0; i <= segments; i++) {
+                    double t = (double)i / segments;
+                    wlr_render_pass_add_rect(
+                        pass,
+                        &(struct wlr_render_rect_options){
+                            .box = {.x = (int)(x1 + dx * t - line_width / 2),
+                                    .y = (int)(y1 + dy * t - line_width / 2),
+                                    .width = (int)line_width + 1,
+                                    .height = (int)line_width + 1},
+                            .color = {.r = stroke->color.r,
+                                      .g = stroke->color.g,
+                                      .b = stroke->color.b,
+                                      .a = DRAWING_COLOR_A},
+                        });
+                }
+            }
+        }
+        prev = point;
+    }
 }
 
 void drawing_render(struct drawing_layer *drawing, struct wlr_render_pass *pass,
-                    int output_width, int output_height, float output_scale) {
-    (void)output_width;
-    (void)output_height;
-
-    struct infinidesk_canvas *canvas = &drawing->server->canvas;
-
-    /*
-     * Combined scale: canvas scale (zoom) * output scale (HiDPI).
-     * canvas_to_screen() returns logical coordinates, but we render
-     * in physical pixels, so we must multiply by output_scale.
-     */
-    double combined_scale = canvas->scale * output_scale;
-
-    /* Render all completed strokes */
+                    int output_width, int output_height, float output_scale,
+                    int output_x, int output_y) {
     struct drawing_stroke *stroke;
     wl_list_for_each(stroke, &drawing->strokes, link) {
-        struct drawing_point *prev_point = NULL;
-        struct drawing_point *point;
-
-        wl_list_for_each(point, &stroke->points, link) {
-            if (prev_point) {
-                /* Convert canvas coordinates to logical screen coordinates */
-                double screen_x1, screen_y1, screen_x2, screen_y2;
-                canvas_to_screen(canvas, prev_point->x, prev_point->y,
-                                 &screen_x1, &screen_y1);
-                canvas_to_screen(canvas, point->x, point->y, &screen_x2,
-                                 &screen_y2);
-
-                /* Convert to physical pixels */
-                screen_x1 *= output_scale;
-                screen_y1 *= output_scale;
-                screen_x2 *= output_scale;
-                screen_y2 *= output_scale;
-
-                /* Draw line segment */
-                /* Note: wlroots doesn't have a direct line primitive,
-                 * so we approximate with small rectangles */
-                double dx = screen_x2 - screen_x1;
-                double dy = screen_y2 - screen_y1;
-                double length = sqrt(dx * dx + dy * dy);
-
-                if (length > 0.1) {
-                    double scaled_width = DRAWING_LINE_WIDTH * combined_scale;
-
-                    /* Draw multiple small rects along the line for smoothness
-                     */
-                    int segments = (int)(length / 2.0) + 1;
-                    for (int i = 0; i <= segments; i++) {
-                        double t = segments > 0 ? (double)i / segments : 0;
-                        double x = screen_x1 + dx * t;
-                        double y = screen_y1 + dy * t;
-
-                        /* Draw a small rectangle at this point */
-                        wlr_render_pass_add_rect(
-                            pass, &(struct wlr_render_rect_options){
-                                      .box =
-                                          {
-                                              .x = (int)(x - scaled_width / 2),
-                                              .y = (int)(y - scaled_width / 2),
-                                              .width = (int)scaled_width + 1,
-                                              .height = (int)scaled_width + 1,
-                                          },
-                                      .color =
-                                          {
-                                              .r = stroke->color.r,
-                                              .g = stroke->color.g,
-                                              .b = stroke->color.b,
-                                              .a = DRAWING_COLOR_A,
-                                          },
-                                  });
-                    }
-                }
-            }
-            prev_point = point;
-        }
+        render_stroke(drawing, stroke, pass, output_width, output_height,
+                      output_scale, output_x, output_y);
     }
-
-    /* Render the current stroke being drawn */
-    if (drawing->is_drawing && drawing->current_stroke) {
-        struct drawing_point *prev_point = NULL;
-        struct drawing_point *point;
-
-        wl_list_for_each(point, &drawing->current_stroke->points, link) {
-            if (prev_point) {
-                double screen_x1, screen_y1, screen_x2, screen_y2;
-                canvas_to_screen(canvas, prev_point->x, prev_point->y,
-                                 &screen_x1, &screen_y1);
-                canvas_to_screen(canvas, point->x, point->y, &screen_x2,
-                                 &screen_y2);
-
-                /* Convert to physical pixels */
-                screen_x1 *= output_scale;
-                screen_y1 *= output_scale;
-                screen_x2 *= output_scale;
-                screen_y2 *= output_scale;
-
-                double dx = screen_x2 - screen_x1;
-                double dy = screen_y2 - screen_y1;
-                double length = sqrt(dx * dx + dy * dy);
-
-                if (length > 0.1) {
-                    double scaled_width = DRAWING_LINE_WIDTH * combined_scale;
-
-                    int segments = (int)(length / 2.0) + 1;
-                    for (int i = 0; i <= segments; i++) {
-                        double t = segments > 0 ? (double)i / segments : 0;
-                        double x = screen_x1 + dx * t;
-                        double y = screen_y1 + dy * t;
-
-                        wlr_render_pass_add_rect(
-                            pass, &(struct wlr_render_rect_options){
-                                      .box =
-                                          {
-                                              .x = (int)(x - scaled_width / 2),
-                                              .y = (int)(y - scaled_width / 2),
-                                              .width = (int)scaled_width + 1,
-                                              .height = (int)scaled_width + 1,
-                                          },
-                                      .color =
-                                          {
-                                              .r = drawing->current_color.r,
-                                              .g = drawing->current_color.g,
-                                              .b = drawing->current_color.b,
-                                              .a = DRAWING_COLOR_A,
-                                          },
-                                  });
-                    }
-                }
-            }
-            prev_point = point;
-        }
+    if (drawing->current_stroke) {
+        render_stroke(drawing, drawing->current_stroke, pass, output_width,
+                      output_height, output_scale, output_x, output_y);
     }
 }
 

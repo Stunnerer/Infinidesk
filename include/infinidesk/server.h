@@ -9,6 +9,7 @@
 #ifndef INFINIDESK_SERVER_H
 #define INFINIDESK_SERVER_H
 
+#include <linux/input-event-codes.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/render/allocator.h>
@@ -60,6 +61,7 @@ struct infinidesk_server {
     struct wlr_renderer *renderer;
     struct wlr_allocator *allocator;
     struct wlr_compositor *compositor;
+    struct wl_listener new_surface;
     struct wlr_subcompositor *subcompositor;
     struct wlr_data_device_manager *data_device_manager;
 
@@ -73,6 +75,7 @@ struct infinidesk_server {
     struct wlr_output_layout *output_layout;
     struct wl_list outputs; /* infinidesk_output.link */
     struct wl_listener new_output;
+    struct wl_listener output_layout_change;
 
     /* Input management */
     struct wlr_seat *seat;
@@ -98,8 +101,8 @@ struct infinidesk_server {
     enum infinidesk_cursor_mode cursor_mode;
     struct infinidesk_view *grabbed_view;
     uint32_t pan_button; /* Button holding a pointer-driven canvas pan */
-    bool super_left_consumed;
-    bool super_right_consumed;
+    bool consumed_buttons[KEY_MAX + 1];
+    uint32_t grab_button;
     double grab_x, grab_y; /* Cursor position at grab start */
     uint32_t resize_edges; /* For resize operations */
     bool

@@ -61,12 +61,11 @@ void drawing_ui_init(struct drawing_ui_panel *panel, int screen_width,
 
     panel->x = UI_PANEL_X;
     panel->y = (screen_height - panel->height) / 2;
+    if (panel->y < 0)
+        panel->y = 0;
 
     panel->hovered_button = UI_BUTTON_NONE;
     panel->pressed_button = UI_BUTTON_NONE;
-
-    wlr_log(WLR_DEBUG, "UI panel initialized at (%d, %d) size %dx%d", panel->x,
-            panel->y, panel->width, panel->height);
 }
 
 void drawing_ui_render(struct drawing_ui_panel *panel,
@@ -96,9 +95,9 @@ void drawing_ui_render(struct drawing_ui_panel *panel,
                                      },
                                  .color =
                                      {
-                                         .r = bg_color[0],
-                                         .g = bg_color[1],
-                                         .b = bg_color[2],
+                                         .r = bg_color[0] * bg_color[3],
+                                         .g = bg_color[1] * bg_color[3],
+                                         .b = bg_color[2] * bg_color[3],
                                          .a = bg_color[3],
                                      },
                              });
@@ -291,7 +290,7 @@ static void render_color_button(struct wlr_render_pass *pass, int x, int y,
     render_button(pass, x, y, width, height, bg_color);
 
     /* Color swatch (centered, smaller than button) */
-    int swatch_size = width - 16;
+    int swatch_size = width * 2 / 3;
     int swatch_x = x + (width - swatch_size) / 2;
     int swatch_y = y + (height - swatch_size) / 2;
 

@@ -18,6 +18,7 @@
 #include <pango/pangocairo.h>
 
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/util/log.h>
 
@@ -69,61 +70,71 @@ void switcher_finish(struct infinidesk_switcher *switcher) {
 
 static struct infinidesk_view *get_next_view(struct infinidesk_server *server,
                                              struct infinidesk_view *current) {
-    if (wl_list_empty(&server->views)) {
-        return NULL;
-    }
-
-    if (!current) {
-        /* Return first view */
-        return wl_container_of(server->views.next, current, link);
-    }
-
-    /* Return next view, wrapping around */
-    if (current->link.next == &server->views) {
-        return wl_container_of(server->views.next, current, link);
-    }
-    return wl_container_of(current->link.next, current, link);
+    struct wl_list *start = current ? &current->link : &server->views;
+    struct wl_list *link = start;
+    do {
+        link = link->next;
+        if (link != &server->views) {
+            struct infinidesk_view *view = wl_container_of(link, view, link);
+            if (view->xdg_toplevel->base->surface->mapped) {
+                return view;
+            }
+        }
+    } while (link != start);
+    return NULL;
 }
 
 static struct infinidesk_view *get_prev_view(struct infinidesk_server *server,
                                              struct infinidesk_view *current) {
-    if (wl_list_empty(&server->views)) {
-        return NULL;
-    }
+    struct wl_list *start = current ? &current->link : &server->views;
+    struct wl_list *link = start;
+    do {
+        link = link->prev;
+        if (link != &server->views) {
+            struct infinidesk_view *view = wl_container_of(link, view, link);
+            if (view->xdg_toplevel->base->surface->mapped) {
+                return view;
+            }
+        }
+    } while (link != start);
+    return NULL;
+}
 
-    if (!current) {
-        /* Return last view */
-        return wl_container_of(server->views.prev, current, link);
+void switcher_view_unmapped(struct infinidesk_switcher *switcher,
+                            struct infinidesk_view *view) {
+    if (switcher->selected == view) {
+        switcher->selected = get_next_view(switcher->server, view);
+        if (switcher->selected == view) {
+            switcher->selected = NULL;
+        }
     }
-
-    /* Return previous view, wrapping around */
-    if (current->link.prev == &server->views) {
-        return wl_container_of(server->views.prev, current, link);
+    if (!switcher->selected) {
+        switcher_cancel(switcher);
     }
-    return wl_container_of(current->link.prev, current, link);
+    switcher->dirty = true;
+    output_schedule_frames(switcher->server);
 }
 
 void switcher_start(struct infinidesk_switcher *switcher) {
     struct infinidesk_server *server = switcher->server;
 
-    if (wl_list_empty(&server->views)) {
-        return;
+    struct infinidesk_view *focused = NULL, *view;
+    wl_list_for_each(view, &server->views, link) {
+        if (view->xdg_toplevel->base->surface ==
+            server->seat->keyboard_state.focused_surface) {
+            focused = view;
+            break;
+        }
     }
-
-    switcher->active = true;
-
-    /* Start with second view (first is already focused) */
-    struct infinidesk_view *first =
-        wl_container_of(server->views.next, first, link);
-    if (first->link.next == &server->views) {
-        /* Only one view */
-        switcher->selected = first;
-    } else {
-        /* Select second view */
-        switcher->selected = get_next_view(server, first);
-    }
+    struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(server->seat);
+    bool reverse =
+        keyboard && (wlr_keyboard_get_modifiers(keyboard) & WLR_MODIFIER_SHIFT);
+    switcher->selected = reverse ? get_prev_view(server, focused)
+                                 : get_next_view(server, focused);
+    switcher->active = switcher->selected != NULL;
 
     switcher->dirty = true;
+    output_schedule_frames(switcher->server);
     wlr_log(WLR_DEBUG, "Switcher started, selected view %p",
             (void *)switcher->selected);
 }
@@ -135,6 +146,7 @@ void switcher_next(struct infinidesk_switcher *switcher) {
 
     switcher->selected = get_next_view(switcher->server, switcher->selected);
     switcher->dirty = true;
+    output_schedule_frames(switcher->server);
     wlr_log(WLR_DEBUG, "Switcher next, selected view %p",
             (void *)switcher->selected);
 }
@@ -146,6 +158,7 @@ void switcher_prev(struct infinidesk_switcher *switcher) {
 
     switcher->selected = get_prev_view(switcher->server, switcher->selected);
     switcher->dirty = true;
+    output_schedule_frames(switcher->server);
     wlr_log(WLR_DEBUG, "Switcher prev, selected view %p",
             (void *)switcher->selected);
 }
@@ -157,10 +170,10 @@ void switcher_confirm(struct infinidesk_switcher *switcher) {
 
     struct infinidesk_server *server = switcher->server;
 
-    if (switcher->selected) {
+    struct infinidesk_output *output = output_get_active(server);
+    if (switcher->selected && output &&
+        switcher->selected->xdg_toplevel->base->surface->mapped) {
         /* Get screen dimensions in logical pixels */
-        struct infinidesk_output *output =
-            wl_container_of(server->outputs.next, output, link);
         int screen_width, screen_height;
         wlr_output_effective_resolution(output->wlr_output, &screen_width,
                                         &screen_height);
@@ -173,6 +186,7 @@ void switcher_confirm(struct infinidesk_switcher *switcher) {
 
     switcher->active = false;
     switcher->selected = NULL;
+    output_schedule_frames(switcher->server);
 
     /* Free texture */
     if (switcher->texture) {
@@ -184,6 +198,7 @@ void switcher_confirm(struct infinidesk_switcher *switcher) {
 void switcher_cancel(struct infinidesk_switcher *switcher) {
     switcher->active = false;
     switcher->selected = NULL;
+    output_schedule_frames(switcher->server);
 
     if (switcher->texture) {
         wlr_texture_destroy(switcher->texture);
@@ -194,13 +209,17 @@ void switcher_cancel(struct infinidesk_switcher *switcher) {
 }
 
 static void render_texture(struct infinidesk_switcher *switcher,
-                           float output_scale) {
+                           float output_scale, int output_width,
+                           int output_height) {
     struct infinidesk_server *server = switcher->server;
 
     /* Count views */
     int view_count = 0;
     struct infinidesk_view *view;
-    wl_list_for_each(view, &server->views, link) { view_count++; }
+    wl_list_for_each(view, &server->views, link) {
+        if (view->xdg_toplevel->base->surface->mapped)
+            view_count++;
+    }
 
     if (view_count == 0) {
         return;
@@ -208,7 +227,30 @@ static void render_texture(struct infinidesk_switcher *switcher,
 
     /* Calculate dimensions in logical pixels */
     int width = SWITCHER_MIN_WIDTH;
-    int height = SWITCHER_PADDING * 2 + view_count * SWITCHER_ITEM_HEIGHT;
+    int available_width = (int)(output_width / output_scale);
+    int available_height = (int)(output_height / output_scale);
+    if (width > available_width)
+        width = available_width;
+    int visible =
+        (available_height - 2 * SWITCHER_PADDING) / SWITCHER_ITEM_HEIGHT;
+    if (width <= 2 * SWITCHER_PADDING || visible <= 0)
+        return;
+    if (visible > view_count)
+        visible = view_count;
+    int selected = 0, index = 0;
+    wl_list_for_each(view, &server->views, link) {
+        if (!view->xdg_toplevel->base->surface->mapped)
+            continue;
+        if (view == switcher->selected)
+            selected = index;
+        index++;
+    }
+    int first = selected - visible / 2;
+    if (first < 0)
+        first = 0;
+    if (first > view_count - visible)
+        first = view_count - visible;
+    int height = SWITCHER_PADDING * 2 + visible * SWITCHER_ITEM_HEIGHT;
 
     /* Calculate physical pixel dimensions for crisp HiDPI rendering */
     int physical_width = (int)(width * output_scale);
@@ -248,7 +290,13 @@ static void render_texture(struct infinidesk_switcher *switcher,
 
     /* Draw each view */
     int item_y = SWITCHER_PADDING;
+    index = 0;
     wl_list_for_each(view, &server->views, link) {
+        if (!view->xdg_toplevel->base->surface->mapped)
+            continue;
+        int row = index++;
+        if (row < first || row >= first + visible)
+            continue;
         /* Draw highlight for selected item */
         if (view == switcher->selected) {
             cairo_set_source_rgba(cr, HIGHLIGHT_R, HIGHLIGHT_G, HIGHLIGHT_B,
@@ -306,6 +354,9 @@ static void render_texture(struct infinidesk_switcher *switcher,
     switcher->texture_width = physical_width;
     switcher->texture_height = physical_height;
     switcher->dirty = false;
+    switcher->texture_scale = output_scale;
+    switcher->output_width = output_width;
+    switcher->output_height = output_height;
 
     cairo_destroy(cr);
     cairo_surface_destroy(surface);
@@ -319,8 +370,11 @@ void switcher_render(struct infinidesk_switcher *switcher,
     }
 
     /* Re-render texture if dirty (at physical resolution for crisp text) */
-    if (switcher->dirty || !switcher->texture) {
-        render_texture(switcher, output_scale);
+    if (switcher->dirty || !switcher->texture ||
+        switcher->texture_scale != output_scale ||
+        switcher->output_width != output_width ||
+        switcher->output_height != output_height) {
+        render_texture(switcher, output_scale, output_width, output_height);
     }
 
     if (!switcher->texture) {

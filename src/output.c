@@ -8,6 +8,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +28,7 @@
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/util/log.h>
+#include <wlr/util/transform.h>
 
 #include "infinidesk/canvas.h"
 #include "infinidesk/drawing.h"
@@ -63,6 +65,8 @@ static bool output_set_nested_mode(struct infinidesk_output *output, int width,
         return false;
     }
 
+    if ((double)width * scale > INT_MAX || (double)height * scale > INT_MAX)
+        return false;
     int buffer_width = (int)lround((double)width * scale);
     int buffer_height = (int)lround((double)height * scale);
     if (buffer_width <= 0 || buffer_height <= 0) {
@@ -162,7 +166,39 @@ static const struct wl_registry_listener nested_registry_listener = {
     .global_remove = nested_handle_global_remove,
 };
 
+void output_schedule_frames(struct infinidesk_server *server) {
+    struct infinidesk_output *output;
+    wl_list_for_each(output, &server->outputs, link) {
+        wlr_output_schedule_frame(output->wlr_output);
+    }
+}
+
+static void output_handle_commit(struct wl_listener *listener, void *data) {
+    struct infinidesk_output *output =
+        wl_container_of(listener, output, commit);
+    struct wlr_output_event_commit *event = data;
+    if (event->state->committed &
+        (WLR_OUTPUT_STATE_MODE | WLR_OUTPUT_STATE_SCALE |
+         WLR_OUTPUT_STATE_TRANSFORM)) {
+        layer_shell_arrange(output);
+        output_schedule_frames(output->server);
+    }
+}
+
+static void output_layout_changed(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct infinidesk_server *server =
+        wl_container_of(listener, server, output_layout_change);
+    struct infinidesk_output *output;
+    wl_list_for_each(output, &server->outputs, link) {
+        layer_shell_arrange(output);
+    }
+}
+
 void output_init(struct infinidesk_server *server) {
+    server->output_layout_change.notify = output_layout_changed;
+    wl_signal_add(&server->output_layout->events.change,
+                  &server->output_layout_change);
     server->new_output.notify = handle_new_output;
     wl_signal_add(&server->backend->events.new_output, &server->new_output);
 }
@@ -188,6 +224,7 @@ void handle_new_output(struct wl_listener *listener, void *data) {
     output->nested_logical_width = wlr_output->width;
     output->nested_logical_height = wlr_output->height;
 
+    wl_list_init(&output->link);
     /* Initialise layer surface lists */
     for (int i = 0; i < LAYER_SHELL_LAYER_COUNT; i++) {
         wl_list_init(&output->layer_surfaces[i]);
@@ -204,7 +241,10 @@ void handle_new_output(struct wl_listener *listener, void *data) {
     wl_signal_add(&wlr_output->events.destroy, &output->destroy);
 
     /* Initialise the output with allocator */
-    wlr_output_init_render(wlr_output, server->allocator, server->renderer);
+    if (!wlr_output_init_render(wlr_output, server->allocator,
+                                server->renderer)) {
+        goto error;
+    }
 
     /* Configure the output mode */
     struct wlr_output_state state;
@@ -223,15 +263,22 @@ void handle_new_output(struct wl_listener *listener, void *data) {
     wlr_output_state_set_scale(&state, server->output_scale);
 
     /* Commit the output state */
-    wlr_output_commit_state(wlr_output, &state);
+    bool committed = wlr_output_commit_state(wlr_output, &state);
     wlr_output_state_finish(&state);
+    if (!committed)
+        goto error;
 
     /* Add output to layout */
     struct wlr_output_layout_output *l_output =
         wlr_output_layout_add_auto(server->output_layout, wlr_output);
 
+    if (!l_output)
+        goto error;
+
     /* Create scene output (still needed for some operations) */
     output->scene_output = wlr_scene_output_create(server->scene, wlr_output);
+    if (!output->scene_output)
+        goto error;
     wlr_scene_output_layout_add_output(server->scene_output_layout, l_output,
                                        output->scene_output);
 
@@ -252,6 +299,13 @@ void handle_new_output(struct wl_listener *listener, void *data) {
     output->layer_trees[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY] =
         wlr_scene_tree_create(&server->scene->tree);
 
+    for (int i = 0; i < LAYER_SHELL_LAYER_COUNT; i++) {
+        if (!output->layer_trees[i])
+            goto error;
+    }
+    output->commit.notify = output_handle_commit;
+    wl_signal_add(&wlr_output->events.commit, &output->commit);
+
     /* Initialise usable area to full output */
     output->usable_area.x = 0;
     output->usable_area.y = 0;
@@ -260,6 +314,7 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 
     /* Add to server's output list */
     wl_list_insert(&server->outputs, &output->link);
+    layer_shell_arrange(output);
 
     /* Set window title and app_id when running nested in a Wayland compositor
      */
@@ -276,24 +331,29 @@ void handle_new_output(struct wl_listener *listener, void *data) {
         wlr_log(WLR_DEBUG, "Set nested Wayland window title/app_id");
     }
 
+    wlr_xcursor_manager_load(server->xcursor_manager, wlr_output->scale);
+    wlr_cursor_set_xcursor(server->cursor, server->xcursor_manager, "default");
     wlr_log(WLR_DEBUG, "Output %s configured", wlr_output->name);
+    return;
+
+error:
+    wlr_log(WLR_ERROR, "Failed to configure output %s", wlr_output->name);
+    if (output->scene_output)
+        wlr_scene_output_destroy(output->scene_output);
+    wlr_output_layout_remove(server->output_layout, wlr_output);
+    for (int i = 0; i < LAYER_SHELL_LAYER_COUNT; i++) {
+        if (output->layer_trees[i])
+            wlr_scene_node_destroy(&output->layer_trees[i]->node);
+    }
+    wl_list_remove(&output->frame.link);
+    wl_list_remove(&output->request_state.link);
+    wl_list_remove(&output->destroy.link);
+    free(output);
 }
 
 void output_handle_frame(struct wl_listener *listener, void *data) {
     (void)data;
     struct infinidesk_output *output = wl_container_of(listener, output, frame);
-    struct infinidesk_server *server = output->server;
-
-    /* Initialize UI panel on first frame if needed */
-    static bool ui_initialized = false;
-    if (!ui_initialized) {
-        int width, height;
-        wlr_output_effective_resolution(output->wlr_output, &width, &height);
-        drawing_ui_init(&server->drawing.ui_panel, width, height);
-        ui_initialized = true;
-        wlr_log(WLR_DEBUG, "Drawing UI panel initialized");
-    }
-
     /* Use custom rendering pipeline */
     output_render_custom(output);
 }
@@ -366,6 +426,9 @@ static void output_render_custom(struct infinidesk_output *output) {
     /* Canvas status stays on the background and moves with the screen. */
     render_canvas_status(output, pass, width, height);
 
+    struct wlr_box output_box;
+    output_get_box(output, &output_box);
+
     /* 3. Render views back-to-front (reverse iteration since list is
      * front-to-back) */
     float output_scale = wlr_output->scale;
@@ -374,7 +437,7 @@ static void output_render_custom(struct infinidesk_output *output) {
         if (!view->xdg_toplevel->base->surface->mapped) {
             continue;
         }
-        view_render(view, pass, output_scale);
+        view_render(view, pass, output_scale, output_box.x, output_box.y);
     }
 
     /* 3b. Render popups on top of all views (so context menus are visible) */
@@ -382,7 +445,8 @@ static void output_render_custom(struct infinidesk_output *output) {
         if (!view->xdg_toplevel->base->surface->mapped) {
             continue;
         }
-        view_render_popups(view, pass, output_scale);
+        view_render_popups(view, pass, output_scale, output_box.x,
+                           output_box.y);
     }
 
     /* 4. Top layer */
@@ -392,23 +456,39 @@ static void output_render_custom(struct infinidesk_output *output) {
     render_layer_surfaces(output, pass, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY);
 
     /* 6. Render drawing layer on top of everything */
-    drawing_render(&server->drawing, pass, width, height, output_scale);
+    drawing_render(&server->drawing, pass, width, height, output_scale,
+                   output_box.x, output_box.y);
 
     /* Render UI panel if drawing mode is active */
-    if (server->drawing.drawing_mode) {
-        drawing_ui_render(&server->drawing.ui_panel, &server->drawing, pass,
-                          width, height, output_scale);
+    if (server->drawing.drawing_mode && output == output_get_active(server)) {
+        drawing_ui_init(&server->drawing.ui_panel, (int)(width / output_scale),
+                        (int)(height / output_scale));
+        struct drawing_ui_panel local_panel = server->drawing.ui_panel;
+        server->drawing.ui_panel.x += output_box.x;
+        server->drawing.ui_panel.y += output_box.y;
+        drawing_ui_update_hover(&server->drawing.ui_panel, server->cursor->x,
+                                server->cursor->y);
+        local_panel.hovered_button = server->drawing.ui_panel.hovered_button;
+        drawing_ui_render(&local_panel, &server->drawing, pass, width, height,
+                          output_scale);
     }
 
     /* Render alt-tab switcher overlay */
     switcher_render(&server->switcher, pass, width, height, output_scale);
 
-    /* Submit the render pass */
-    wlr_render_pass_submit(pass);
+    wlr_output_add_software_cursors_to_render_pass(wlr_output, pass, NULL);
+    if (!wlr_render_pass_submit(pass)) {
+        wlr_output_state_finish(&state);
+        wlr_output_schedule_frame(wlr_output);
+        return;
+    }
 
     /* Commit the output - check for failure */
     if (!wlr_output_commit_state(wlr_output, &state)) {
         wlr_log(WLR_ERROR, "Failed to commit output state");
+        wlr_output_state_finish(&state);
+        wlr_output_schedule_frame(wlr_output);
+        return;
     }
     wlr_output_state_finish(&state);
 
@@ -429,6 +509,9 @@ static void output_render_custom(struct infinidesk_output *output) {
 
     /* Send frame done to layer surfaces */
     send_layer_frame_done(output, &now);
+    if (view_any_animating(server) || server->canvas.snap_anim_active) {
+        wlr_output_schedule_frame(wlr_output);
+    }
 }
 
 static void render_canvas_status(struct infinidesk_output *output,
@@ -444,8 +527,10 @@ static void render_canvas_status(struct infinidesk_output *output,
 
     wlr_output_effective_resolution(output->wlr_output, &logical_width,
                                     &logical_height);
-    canvas_get_viewport_centre(&server->canvas, logical_width, logical_height,
-                               &centre_x, &centre_y);
+    struct wlr_box box;
+    output_get_box(output, &box);
+    screen_to_canvas(&server->canvas, box.x + logical_width / 2.0,
+                     box.y + logical_height / 2.0, &centre_x, &centre_y);
     snprintf(text, sizeof(text), "Center: (%.1f, %.1f)  Zoom: %.0f%%",
              centre_x, centre_y, server->canvas.scale * 100.0);
 
@@ -562,7 +647,10 @@ void output_handle_request_state(struct wl_listener *listener, void *data) {
     }
 
     /* Apply the requested state */
-    wlr_output_commit_state(output->wlr_output, event->state);
+    if (!wlr_output_commit_state(output->wlr_output, event->state)) {
+        wlr_log(WLR_ERROR, "Failed to apply output state");
+        return;
+    }
     if (output->nested_registry &&
         (event->state->committed & WLR_OUTPUT_STATE_MODE) &&
         event->state->mode_type == WLR_OUTPUT_STATE_MODE_CUSTOM) {
@@ -578,6 +666,17 @@ void output_handle_destroy(struct wl_listener *listener, void *data) {
 
     wlr_log(WLR_INFO, "Output %s destroyed", output->wlr_output->name);
 
+    output->destroying = true;
+    /* Close layer surfaces while their output wrapper and scene trees live. */
+    for (int i = 0; i < LAYER_SHELL_LAYER_COUNT; i++) {
+        while (!wl_list_empty(&output->layer_surfaces[i])) {
+            struct infinidesk_layer_surface *layer =
+                wl_container_of(output->layer_surfaces[i].next, layer, link);
+            wlr_layer_surface_v1_destroy(layer->layer_surface);
+        }
+        wlr_scene_node_destroy(&output->layer_trees[i]->node);
+    }
+    wl_list_remove(&output->commit.link);
     wl_list_remove(&output->link);
     wl_list_remove(&output->frame.link);
     wl_list_remove(&output->request_state.link);
@@ -642,13 +741,9 @@ static void render_layer_surface_iterator(struct wlr_surface *surface, int sx,
 
     int width = surface->current.width;
     int height = surface->current.height;
-    int buffer_scale = surface->current.scale;
 
     if (width <= 0 || height <= 0) {
         return;
-    }
-    if (buffer_scale <= 0) {
-        buffer_scale = 1;
     }
 
     /* Convert logical coordinates to physical pixels */
@@ -657,6 +752,9 @@ static void render_layer_surface_iterator(struct wlr_surface *surface, int sx,
     int dst_y = (int)((rdata->y + sy) * scale);
     int dst_width = (int)(width * scale);
     int dst_height = (int)(height * scale);
+
+    if (dst_width <= 0 || dst_height <= 0)
+        return;
 
     /*
      * Get the source box from the surface.
@@ -671,6 +769,8 @@ static void render_layer_surface_iterator(struct wlr_surface *surface, int sx,
         rdata->pass, &(struct wlr_render_texture_options){
                          .texture = texture,
                          .src_box = src_box,
+                         .transform = wlr_output_transform_invert(
+                             surface->current.transform),
                          .dst_box =
                              {
                                  .x = dst_x,
@@ -703,9 +803,8 @@ static void render_layer_surfaces(struct infinidesk_output *output,
             .output_scale = output->wlr_output->scale,
         };
 
-        wlr_layer_surface_v1_for_each_surface(layer_surface->layer_surface,
-                                              render_layer_surface_iterator,
-                                              &rdata);
+        wlr_surface_for_each_surface(layer_surface->layer_surface->surface,
+                                     render_layer_surface_iterator, &rdata);
     }
 
     /* Popups sit above the layer surfaces in the same layer. */
@@ -737,13 +836,36 @@ static void send_layer_frame_done(struct infinidesk_output *output,
         struct infinidesk_layer_surface *layer_surface;
         wl_list_for_each(layer_surface, &output->layer_surfaces[layer], link) {
             if (layer_surface->layer_surface->surface->mapped) {
-                wlr_layer_surface_v1_for_each_surface(
-                    layer_surface->layer_surface, send_frame_done_iterator,
-                    now);
+                wlr_surface_for_each_surface(
+                    layer_surface->layer_surface->surface,
+                    send_frame_done_iterator, now);
                 wlr_layer_surface_v1_for_each_popup_surface(
                     layer_surface->layer_surface, send_frame_done_iterator,
                     now);
             }
         }
     }
+}
+
+struct infinidesk_output *output_at(struct infinidesk_server *server, double x,
+                                    double y) {
+    struct wlr_output *wlr_output =
+        wlr_output_layout_output_at(server->output_layout, x, y);
+    struct infinidesk_output *output;
+    wl_list_for_each(output, &server->outputs, link) {
+        if (output->wlr_output == wlr_output)
+            return output;
+    }
+    return NULL;
+}
+
+struct infinidesk_output *output_get_active(struct infinidesk_server *server) {
+    struct infinidesk_output *output =
+        output_at(server, server->cursor->x, server->cursor->y);
+    return output ? output : output_get_primary(server);
+}
+
+void output_get_box(struct infinidesk_output *output, struct wlr_box *box) {
+    wlr_output_layout_get_box(output->server->output_layout, output->wlr_output,
+                              box);
 }

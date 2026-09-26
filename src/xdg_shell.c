@@ -16,6 +16,7 @@
 #include <wlr/util/log.h>
 
 #include "infinidesk/canvas.h"
+#include "infinidesk/layer_shell.h"
 #include "infinidesk/output.h"
 #include "infinidesk/server.h"
 #include "infinidesk/view.h"
@@ -27,7 +28,7 @@
  */
 struct infinidesk_popup {
     struct wlr_xdg_popup *xdg_popup;
-    struct infinidesk_view *parent_view;
+    struct wl_listener reposition;
 
     struct wl_listener commit;
     struct wl_listener destroy;
@@ -96,6 +97,7 @@ void handle_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     struct infinidesk_view *view = view_create(server, xdg_toplevel);
     if (!view) {
         wlr_log(WLR_ERROR, "Failed to create view for toplevel");
+        wl_resource_post_no_memory(xdg_toplevel->resource);
         return;
     }
 
@@ -105,49 +107,61 @@ void handle_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 /*
  * Handle popup surface commit - unconstrain on initial commit.
  */
+static void popup_unconstrain(struct infinidesk_popup *popup) {
+    struct wlr_surface *root = popup->xdg_popup->parent;
+    struct wlr_xdg_surface *xdg =
+        root ? wlr_xdg_surface_try_from_wlr_surface(root) : NULL;
+    while (xdg && xdg->role == WLR_XDG_SURFACE_ROLE_POPUP) {
+        root = xdg->popup->parent;
+        xdg = root ? wlr_xdg_surface_try_from_wlr_surface(root) : NULL;
+    }
+    struct wlr_box box;
+    if (xdg && xdg->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL && xdg->data) {
+        struct infinidesk_view *view = xdg->data;
+        struct infinidesk_output *output = output_get_active(view->server);
+        if (!output)
+            return;
+        output_get_box(output, &box);
+        struct infinidesk_canvas *canvas = &view->server->canvas;
+        struct wlr_box geo;
+        wlr_xdg_surface_get_geometry(xdg, &geo);
+        double left =
+            canvas->viewport_x + box.x / canvas->scale - view->x + geo.x;
+        double top =
+            canvas->viewport_y + box.y / canvas->scale - view->y + geo.y;
+        box = (struct wlr_box){
+            .x = (int)floor(left),
+            .y = (int)floor(top),
+            .width =
+                (int)ceil(left + box.width / canvas->scale) - (int)floor(left),
+            .height =
+                (int)ceil(top + box.height / canvas->scale) - (int)floor(top),
+        };
+    } else {
+        struct wlr_layer_surface_v1 *surface =
+            root ? wlr_layer_surface_v1_try_from_wlr_surface(root) : NULL;
+        struct infinidesk_layer_surface *layer = surface ? surface->data : NULL;
+        if (!layer)
+            return;
+        output_get_box(layer->output, &box);
+        box.x = -layer->scene_tree->node.x;
+        box.y = -layer->scene_tree->node.y;
+    }
+    wlr_xdg_popup_unconstrain_from_box(popup->xdg_popup, &box);
+}
+
 static void handle_popup_commit(struct wl_listener *listener, void *data) {
     (void)data;
     struct infinidesk_popup *popup = wl_container_of(listener, popup, commit);
+    if (popup->xdg_popup->base->initial_commit)
+        popup_unconstrain(popup);
+}
 
-    if (popup->xdg_popup->base->initial_commit) {
-        /*
-         * Unconstrain the popup so it knows where it can be positioned.
-         * We give it the full output bounds as the constraint box.
-         */
-        struct infinidesk_view *view = popup->parent_view;
-        if (view && view->server) {
-            struct infinidesk_output *output = output_get_primary(view->server);
-            if (output) {
-                int width, height;
-                output_get_effective_resolution(output, &width, &height);
-
-                /*
-                 * The unconstrain box is in the toplevel's coordinate system.
-                 * We need to calculate where the usable area is relative to
-                 * the toplevel's position.
-                 */
-                struct infinidesk_canvas *canvas = &view->server->canvas;
-                struct wlr_box geo;
-                wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo);
-
-                /* The box is relative to the root surface's buffer origin,
-                 * while the view position refers to its window geometry. */
-                double left = canvas->viewport_x - view->x + geo.x;
-                double top = canvas->viewport_y - view->y + geo.y;
-                struct wlr_box constraint_box = {
-                    .x = (int)floor(left),
-                    .y = (int)floor(top),
-                    .width = (int)ceil(left + width / canvas->scale) -
-                             (int)floor(left),
-                    .height = (int)ceil(top + height / canvas->scale) -
-                              (int)floor(top),
-                };
-
-                wlr_xdg_popup_unconstrain_from_box(popup->xdg_popup,
-                                                   &constraint_box);
-            }
-        }
-    }
+static void handle_popup_reposition(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct infinidesk_popup *popup =
+        wl_container_of(listener, popup, reposition);
+    popup_unconstrain(popup);
 }
 
 /*
@@ -159,112 +173,49 @@ static void handle_popup_destroy(struct wl_listener *listener, void *data) {
 
     wlr_log(WLR_DEBUG, "Popup destroyed");
 
+    wl_list_remove(&popup->reposition.link);
     wl_list_remove(&popup->commit.link);
     wl_list_remove(&popup->destroy.link);
     free(popup);
 }
 
-void handle_new_xdg_popup(struct wl_listener *listener, void *data) {
-    (void)listener;
-    struct wlr_xdg_popup *xdg_popup = data;
-
-    wlr_log(WLR_DEBUG, "New XDG popup");
-
-    /* Layer-shell popups have no XDG parent. Their layer surface attaches
-     * them through its own new_popup handler. */
-    if (!xdg_popup->parent) {
-        return;
-    }
-
-    /*
-     * Popups need to be attached to the scene graph.
-     * We find the parent surface and create the popup in its scene tree.
-     */
-    struct wlr_xdg_surface *parent_surface =
-        wlr_xdg_surface_try_from_wlr_surface(xdg_popup->parent);
-    if (!parent_surface) {
-        wlr_log(WLR_ERROR, "Popup has no parent XDG surface");
-        return;
-    }
-
-    /*
-     * Get the parent's scene tree and parent view.
-     * The data pointer differs based on the parent's role:
-     * - For toplevels: data is a struct infinidesk_view*, get scene_tree from
-     * it
-     * - For popups: data is already a struct wlr_scene_tree*
-     */
-    struct wlr_scene_tree *parent_tree = NULL;
-    struct infinidesk_view *parent_view = NULL;
-
-    if (parent_surface->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
-        wlr_log(WLR_DEBUG, "Popup parent is a toplevel");
-        parent_view = parent_surface->data;
-        if (parent_view) {
-            parent_tree = parent_view->scene_tree;
-        }
-    } else {
-        wlr_log(WLR_DEBUG, "Popup parent is another popup");
-        /* Parent is a popup - data points directly to scene tree */
-        parent_tree = parent_surface->data;
-
-        /*
-         * For nested popups, we need to find the root toplevel view.
-         * Walk up the parent chain to find it.
-         */
-        struct wlr_xdg_surface *surface = parent_surface;
-        while (surface && surface->role == WLR_XDG_SURFACE_ROLE_POPUP) {
-            struct wlr_xdg_popup *parent_popup = surface->popup;
-            if (!parent_popup || !parent_popup->parent) {
-                break;
-            }
-            surface =
-                wlr_xdg_surface_try_from_wlr_surface(parent_popup->parent);
-        }
-        if (surface && surface->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
-            parent_view = surface->data;
-        }
-    }
-
-    if (!parent_tree) {
-        wlr_log(WLR_ERROR, "Parent surface has no scene tree");
-        return;
-    }
-
-    /*
-     * Create the popup in the scene graph.
-     * wlr_scene_xdg_surface_create handles the popup positioning
-     * relative to its parent automatically.
-     */
-    struct wlr_scene_tree *popup_tree =
-        wlr_scene_xdg_surface_create(parent_tree, xdg_popup->base);
-    if (!popup_tree) {
-        wlr_log(WLR_ERROR, "Failed to create scene tree for popup");
-        return;
-    }
-
-    /* Store reference to the scene tree in the xdg_surface */
-    xdg_popup->base->data = popup_tree;
-
-    /*
-     * Create popup tracking structure for commit/destroy handling.
-     */
+void xdg_popup_create(struct wlr_scene_tree *parent_tree,
+                      struct wlr_xdg_popup *xdg_popup) {
     struct infinidesk_popup *popup = calloc(1, sizeof(*popup));
     if (!popup) {
-        wlr_log(WLR_ERROR, "Failed to allocate popup structure");
+        wl_resource_post_no_memory(xdg_popup->resource);
         return;
     }
-
+    struct wlr_scene_tree *tree =
+        wlr_scene_xdg_surface_create(parent_tree, xdg_popup->base);
+    if (!tree) {
+        free(popup);
+        wl_resource_post_no_memory(xdg_popup->resource);
+        return;
+    }
+    xdg_popup->base->data = tree;
     popup->xdg_popup = xdg_popup;
-    popup->parent_view = parent_view;
-
-    /* Listen for commit to unconstrain popup on initial commit */
     popup->commit.notify = handle_popup_commit;
     wl_signal_add(&xdg_popup->base->surface->events.commit, &popup->commit);
-
-    /* Listen for destroy to clean up */
+    popup->reposition.notify = handle_popup_reposition;
+    wl_signal_add(&xdg_popup->events.reposition, &popup->reposition);
     popup->destroy.notify = handle_popup_destroy;
-    wl_signal_add(&xdg_popup->base->events.destroy, &popup->destroy);
+    wl_signal_add(&xdg_popup->events.destroy, &popup->destroy);
+}
 
-    wlr_log(WLR_DEBUG, "Created popup scene tree");
+void handle_new_xdg_popup(struct wl_listener *listener, void *data) {
+    (void)listener;
+    struct wlr_xdg_popup *popup = data;
+    /* Layer-shell attaches its root popup through its new_popup signal. */
+    if (!popup->parent)
+        return;
+    struct wlr_xdg_surface *parent =
+        wlr_xdg_surface_try_from_wlr_surface(popup->parent);
+    if (!parent || !parent->data)
+        return;
+    struct wlr_scene_tree *tree =
+        parent->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL
+            ? ((struct infinidesk_view *)parent->data)->scene_tree
+            : parent->data;
+    xdg_popup_create(tree, popup);
 }

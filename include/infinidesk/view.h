@@ -189,14 +189,15 @@ void view_close(struct infinidesk_view *view);
  * output_scale is the HiDPI scale factor of the output (e.g., 1.0, 1.5, 2.0).
  */
 void view_render(struct infinidesk_view *view, struct wlr_render_pass *pass,
-                 float output_scale);
+                 float output_scale, int output_x, int output_y);
 
 /*
  * Render the view's popup surfaces (context menus, dropdowns, etc.).
  * Should be called after all views are rendered so popups appear on top.
  */
 void view_render_popups(struct infinidesk_view *view,
-                        struct wlr_render_pass *pass, float output_scale);
+                        struct wlr_render_pass *pass, float output_scale,
+                        int output_x, int output_y);
 
 /*
  * Snaps to a view
@@ -217,8 +218,8 @@ void view_update_focus_animations(struct infinidesk_server *server,
 bool view_any_animating(struct infinidesk_server *server);
 
 /*
- * Gather all views so they are exactly minimum_gap pixels apart (edge-to-edge),
- * preserving relative directional positioning, and center on viewport.
+ * Gather mapped views around the active viewport, keeping at least
+ * minimum_gap canvas units between their geometry rectangles.
  */
 void views_gather(struct infinidesk_server *server, double minimum_gap);
 

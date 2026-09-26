@@ -114,6 +114,7 @@ void drawing_stroke_end(struct drawing_layer *drawing);
  * output_scale is the HiDPI scale factor for converting to physical pixels.
  */
 void drawing_render(struct drawing_layer *drawing, struct wlr_render_pass *pass,
-                    int output_width, int output_height, float output_scale);
+                    int output_width, int output_height, float output_scale,
+                    int output_x, int output_y);
 
 #endif /* INFINIDESK_DRAWING_H */

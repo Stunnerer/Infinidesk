@@ -8,6 +8,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <pango/pangocairo.h>
 #include <stdlib.h>
 
 #include <wlr/backend.h>
@@ -41,6 +42,46 @@
 #include "infinidesk/switcher.h"
 #include "infinidesk/view.h"
 #include "infinidesk/xdg_shell.h"
+
+struct surface_damage_listener {
+    struct infinidesk_server *server;
+    struct wl_listener commit, destroy;
+};
+
+static void surface_committed(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct surface_damage_listener *tracking =
+        wl_container_of(listener, tracking, commit);
+    /* Scene visibility differs from our scaled canvas, including subsurfaces.
+     */
+    output_schedule_frames(tracking->server);
+}
+
+static void surface_destroyed(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct surface_damage_listener *tracking =
+        wl_container_of(listener, tracking, destroy);
+    output_schedule_frames(tracking->server);
+    wl_list_remove(&tracking->commit.link);
+    wl_list_remove(&tracking->destroy.link);
+    free(tracking);
+}
+
+static void handle_new_surface(struct wl_listener *listener, void *data) {
+    struct infinidesk_server *server =
+        wl_container_of(listener, server, new_surface);
+    struct wlr_surface *surface = data;
+    struct surface_damage_listener *tracking = calloc(1, sizeof(*tracking));
+    if (!tracking) {
+        wl_resource_post_no_memory(surface->resource);
+        return;
+    }
+    tracking->server = server;
+    tracking->commit.notify = surface_committed;
+    tracking->destroy.notify = surface_destroyed;
+    wl_signal_add(&surface->events.commit, &tracking->commit);
+    wl_signal_add(&surface->events.destroy, &tracking->destroy);
+}
 
 bool server_init(struct infinidesk_server *server) {
     wlr_log(WLR_DEBUG, "Initialising Wayland display");
@@ -79,7 +120,9 @@ bool server_init(struct infinidesk_server *server) {
         wlr_log(WLR_ERROR, "Failed to create wlroots renderer");
         goto error_backend;
     }
-    wlr_renderer_init_wl_display(server->renderer, server->wl_display);
+    if (!wlr_renderer_init_wl_display(server->renderer, server->wl_display)) {
+        goto error_renderer;
+    }
 
     /* Create the allocator */
     wlr_log(WLR_DEBUG, "Creating allocator");
@@ -175,6 +218,10 @@ bool server_init(struct infinidesk_server *server) {
     wl_list_init(&server->views);
     wl_list_init(&server->keyboards);
 
+    server->new_surface.notify = handle_new_surface;
+    wl_signal_add(&server->compositor->events.new_surface,
+                  &server->new_surface);
+
     /* Initialise the canvas */
     canvas_init(&server->canvas, server);
 
@@ -189,15 +236,23 @@ bool server_init(struct infinidesk_server *server) {
 
     /* Initialise input handling */
     input_init(server);
+    if (!server->seat)
+        goto error_scene;
 
     /* Initialise cursor */
     cursor_init(server);
+    if (!server->cursor)
+        goto error_scene;
 
     /* Initialise XDG shell */
     xdg_shell_init(server);
+    if (!server->xdg_shell)
+        goto error_scene;
 
     /* Initialise layer shell */
     layer_shell_init(server);
+    if (!server->layer_shell)
+        goto error_scene;
 
     /* Initialise background */
     background_init(server);
@@ -206,7 +261,11 @@ bool server_init(struct infinidesk_server *server) {
     return true;
 
 error_scene:
-    /* Scene is destroyed with display */
+    if (server->cursor)
+        wlr_cursor_destroy(server->cursor);
+    if (server->xcursor_manager)
+        wlr_xcursor_manager_destroy(server->xcursor_manager);
+    wlr_scene_node_destroy(&server->scene->tree.node);
 error_output_layout:
     /* Output layout is destroyed with display */
 error_allocator:
@@ -301,9 +360,21 @@ void server_finish(struct infinidesk_server *server) {
         free(kb);
     }
 
+    if (server->scroll_pan_timer) {
+        wl_event_source_remove(server->scroll_pan_timer);
+    }
+    /* Backend teardown must run while the seat and renderer are alive. */
+    wlr_backend_destroy(server->backend);
+    wlr_cursor_destroy(server->cursor);
+    wlr_xcursor_manager_destroy(server->xcursor_manager);
+    wlr_scene_node_destroy(&server->scene->tree.node);
+    wlr_allocator_destroy(server->allocator);
+    wlr_renderer_destroy(server->renderer);
+
     /* Most remaining resources are cleaned up when the display is destroyed,
      * as they're attached to it. */
     wl_display_destroy(server->wl_display);
+    pango_cairo_font_map_set_default(NULL);
 }
 
 struct infinidesk_view *server_view_at(struct infinidesk_server *server,
@@ -321,6 +392,14 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
      * convert back to surface-local coordinates.
      */
 
+    struct wlr_surface *ignored_surface;
+    double ignored_sx, ignored_sy;
+    if (!surface)
+        surface = &ignored_surface;
+    if (!sx)
+        sx = &ignored_sx;
+    if (!sy)
+        sy = &ignored_sy;
     struct infinidesk_canvas *canvas = &server->canvas;
 
     /* Popups can extend outside their parent window. They are rendered above
@@ -407,15 +486,7 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
                 return view;
             }
 
-            /*
-             * If no surface found at exact point (e.g., in transparent
-             * regions of CSD), return the main surface anyway.
-             * Use buffer-local coordinates for the main surface.
-             */
-            *surface = view->xdg_toplevel->base->surface;
-            *sx = surface_local_x;
-            *sy = surface_local_y;
-            return view;
+            /* Respect the client input region and try windows below. */
         }
     }
 
@@ -433,10 +504,10 @@ uint32_t server_view_edge_at(struct infinidesk_server *server, double lx,
      * Returns a bitfield of edges (WLR_EDGE_TOP, WLR_EDGE_LEFT, etc.)
      * or WLR_EDGE_NONE if not near any edge.
      *
-     * The grab zone scales with output scale for HiDPI displays.
+     * Layout coordinates are logical pixels, independent of output scale.
      */
     const double base_grab_zone = 10.0;
-    double grab_zone = base_grab_zone * server->output_scale;
+    double grab_zone = base_grab_zone;
 
     struct infinidesk_canvas *canvas = &server->canvas;
 

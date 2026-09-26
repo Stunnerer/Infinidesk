@@ -63,6 +63,8 @@ struct infinidesk_output {
     int nested_logical_width;
     int nested_logical_height;
 
+    bool destroying;
+    struct wl_listener commit;
     struct wl_listener frame;
     struct wl_listener request_state;
     struct wl_listener destroy;
@@ -71,6 +73,13 @@ struct infinidesk_output {
 /*
  * Initialise output handling for the server.
  */
+struct infinidesk_output *output_at(struct infinidesk_server *server, double x,
+                                    double y);
+struct infinidesk_output *output_get_active(struct infinidesk_server *server);
+void output_get_box(struct infinidesk_output *output, struct wlr_box *box);
+
+void output_schedule_frames(struct infinidesk_server *server);
+
 void output_init(struct infinidesk_server *server);
 
 /*

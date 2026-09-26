@@ -8,6 +8,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <math.h>
 #include <wlr/util/log.h>
 
 #include "infinidesk/canvas.h"
@@ -67,6 +68,7 @@ void screen_to_canvas(struct infinidesk_canvas *canvas, double screen_x,
 
 void canvas_pan_begin(struct infinidesk_canvas *canvas, double cursor_x,
                       double cursor_y) {
+    canvas->snap_anim_active = false;
     canvas->is_panning = true;
     canvas->pan_start_cursor_x = cursor_x;
     canvas->pan_start_cursor_y = cursor_y;
@@ -107,6 +109,9 @@ void canvas_pan_end(struct infinidesk_canvas *canvas) {
 
 void canvas_pan_delta(struct infinidesk_canvas *canvas, double delta_x,
                       double delta_y) {
+    if (!isfinite(delta_x) || !isfinite(delta_y))
+        return;
+    canvas->snap_anim_active = false;
     /* Move the viewport with the scroll delta; content moves oppositely. */
     canvas->viewport_x += (delta_x * PAN_SENSITIVITY) / canvas->scale;
     canvas->viewport_y += (delta_y * PAN_SENSITIVITY) / canvas->scale;
@@ -117,6 +122,10 @@ void canvas_pan_delta(struct infinidesk_canvas *canvas, double delta_x,
 
 void canvas_zoom(struct infinidesk_canvas *canvas, double factor,
                  double focus_x, double focus_y) {
+    if (!isfinite(factor) || factor <= 0 || !isfinite(focus_x) ||
+        !isfinite(focus_y))
+        return;
+    canvas->snap_anim_active = false;
     /* Calculate new scale, clamped to limits */
     double new_scale = canvas->scale * factor;
     if (new_scale < ZOOM_MIN) {

@@ -33,6 +33,8 @@ struct infinidesk_switcher {
 
     /* Need to re-render */
     bool dirty;
+    float texture_scale;
+    int output_width, output_height;
 };
 
 /*
@@ -49,6 +51,9 @@ void switcher_finish(struct infinidesk_switcher *switcher);
 /*
  * Start the switcher, selecting the next view.
  */
+void switcher_view_unmapped(struct infinidesk_switcher *switcher,
+                            struct infinidesk_view *view);
+
 void switcher_start(struct infinidesk_switcher *switcher);
 
 /*

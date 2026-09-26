@@ -69,7 +69,7 @@ void layer_shell_get_usable_area(struct infinidesk_output *output,
                                  struct wlr_box *usable_area);
 
 /*
- * Find a layer surface at the given output-local coordinates.
+ * Find a layer surface at the given layout coordinates.
  * Returns the surface and surface-local coordinates, or NULL if not found.
  * Searches from overlay to background (top to bottom in z-order).
  */
