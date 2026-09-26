@@ -10,7 +10,9 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,7 +53,7 @@ static const char *DEFAULT_CONFIG =
     "gesture_speed = 1.0\n"
     "\n"
     "[keybinds]\n"
-    "\"super + t\" = \"exec:kitty\"\n"
+    "\"super + Return\" = \"exec:kitty\"\n"
     "\"super + q\" = \"close_window\"\n"
     "\"super + escape\" = \"exit\"\n"
     "\"super + d\" = \"toggle_drawing\"\n"
@@ -107,20 +109,19 @@ static bool create_directories(const char *path) {
  * Caller must free the returned string.
  */
 static char *get_config_path(void) {
-    const char *home = getenv("HOME");
-    if (!home) {
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    const char *user_home = getenv("HOME");
+    bool use_xdg = config_home && config_home[0] == '/';
+    if (!use_xdg && (!user_home || !*user_home)) {
         wlr_log(WLR_ERROR, "HOME environment variable not set");
         return NULL;
     }
-
-    size_t len =
-        strlen(home) + 1 + strlen(CONFIG_DIR) + 1 + strlen(CONFIG_FILE) + 1;
+    const char *base = use_xdg ? config_home : user_home;
+    const char *dir = use_xdg ? "infinidesk" : CONFIG_DIR;
+    size_t len = strlen(base) + strlen(dir) + strlen(CONFIG_FILE) + 3;
     char *path = malloc(len);
-    if (!path) {
-        return NULL;
-    }
-
-    snprintf(path, len, "%s/%s/%s", home, CONFIG_DIR, CONFIG_FILE);
+    if (path)
+        snprintf(path, len, "%s/%s/%s", base, dir, CONFIG_FILE);
     return path;
 }
 
@@ -139,15 +140,24 @@ static bool ensure_config_file(const char *path) {
     }
 
     /* Create the file with default content */
-    FILE *f = fopen(path, "w");
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0 && errno == EEXIST) {
+        return true;
+    }
+    FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;
     if (!f) {
+        if (fd >= 0) {
+            close(fd);
+        }
         wlr_log(WLR_ERROR, "Failed to create config file %s: %s", path,
                 strerror(errno));
         return false;
     }
 
-    fputs(DEFAULT_CONFIG, f);
-    fclose(f);
+    bool written = fputs(DEFAULT_CONFIG, f) >= 0;
+    if (fclose(f) != 0 || !written) {
+        return false;
+    }
 
     wlr_log(WLR_INFO, "Created default config file: %s", path);
     return true;
@@ -167,10 +177,9 @@ static char *skip_whitespace(char *s) {
  * Trim trailing whitespace in place.
  */
 static void trim_trailing(char *s) {
-    char *end = s + strlen(s) - 1;
-    while (end > s && isspace((unsigned char)*end)) {
-        *end = '\0';
-        end--;
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1])) {
+        s[--len] = '\0';
     }
 }
 
@@ -227,6 +236,15 @@ static char *parse_quoted_string(char **cursor) {
                 case 't':
                     *dst++ = '\t';
                     break;
+                case 'r':
+                    *dst++ = '\r';
+                    break;
+                case 'b':
+                    *dst++ = '\b';
+                    break;
+                case 'f':
+                    *dst++ = '\f';
+                    break;
                 case '\\':
                     *dst++ = '\\';
                     break;
@@ -234,8 +252,8 @@ static char *parse_quoted_string(char **cursor) {
                     *dst++ = '"';
                     break;
                 default:
-                    *dst++ = *src;
-                    break;
+                    free(result);
+                    return NULL;
                 }
                 src++;
             } else {
@@ -256,94 +274,80 @@ static char *parse_quoted_string(char **cursor) {
  * Parse the startup array from the config file.
  */
 static bool parse_startup_array(FILE *f, struct infinidesk_config *config) {
-    char line[MAX_LINE_LENGTH];
+    char *line = NULL;
+    size_t line_capacity = 0;
     int capacity = INITIAL_COMMANDS_CAPACITY;
-    int count = 0;
-
+    bool in_array = false, need_separator = false, success = true;
     config->startup_commands = malloc(capacity * sizeof(char *));
-    if (!config->startup_commands) {
+    if (!config->startup_commands)
         return false;
-    }
 
-    bool in_array = false;
-
-    while (fgets(line, sizeof(line), f)) {
+    while (getline(&line, &line_capacity, f) >= 0) {
         char *p = skip_whitespace(line);
-
-        /* Skip empty lines and comments */
-        if (*p == '\0' || *p == '#') {
+        if (*p == '\0' || *p == '#')
             continue;
-        }
-
-        trim_trailing(p);
-
-        /* Look for 'startup = [' */
         if (!in_array) {
-            if (strncmp(p, "startup", 7) == 0) {
-                p = skip_whitespace(p + 7);
-                if (*p == '=') {
-                    p = skip_whitespace(p + 1);
-                    if (*p == '[') {
-                        in_array = true;
-                        p = skip_whitespace(p + 1);
-
-                        /* Check for inline content after '[' */
-                        if (*p == ']') {
-                            /* Empty array */
-                            break;
-                        }
-                        if (*p == '"') {
-                            goto parse_string;
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        /* Inside the array */
-        if (*p == ']') {
-            /* End of array */
-            break;
-        }
-
-    parse_string:
-        if (*p == '"') {
-            char *cmd = parse_quoted_string(&p);
-            if (cmd) {
-                /* Expand array if needed */
-                if (count >= capacity) {
-                    capacity *= 2;
-                    char **new_cmds = realloc(config->startup_commands,
-                                              capacity * sizeof(char *));
-                    if (!new_cmds) {
-                        free(cmd);
-                        return false;
-                    }
-                    config->startup_commands = new_cmds;
-                }
-                config->startup_commands[count++] = cmd;
-                wlr_log(WLR_DEBUG, "Config: startup command: %s", cmd);
-            }
-
-            /* Skip comma and whitespace */
-            p = skip_whitespace(p);
-            if (*p == ',') {
-                p = skip_whitespace(p + 1);
-            }
-
-            /* Check for more strings on same line or array end */
-            if (*p == ']') {
+            if (*p == '[')
+                break; /* startup is a root key */
+            if (strncmp(p, "startup", 7) != 0)
+                continue;
+            p = skip_whitespace(p + 7);
+            if (*p != '=')
+                continue;
+            p = skip_whitespace(p + 1);
+            if (*p != '[') {
+                success = false;
                 break;
             }
-            if (*p == '"') {
-                goto parse_string;
+            in_array = true;
+            p++;
+        }
+        while (true) {
+            p = skip_whitespace(p);
+            if (*p == '\0' || *p == '#')
+                break;
+            if (*p == ']') {
+                p = skip_whitespace(p + 1);
+                success = *p == '\0' || *p == '#';
+                in_array = false;
+                goto done;
             }
+            if (need_separator) {
+                if (*p != ',') {
+                    success = false;
+                    goto done;
+                }
+                need_separator = false;
+                p++;
+                continue;
+            }
+            char *cmd = parse_quoted_string(&p);
+            if (!cmd) {
+                success = false;
+                goto done;
+            }
+            if (config->startup_command_count == capacity) {
+                capacity *= 2;
+                char **commands = realloc(config->startup_commands,
+                                          capacity * sizeof(*commands));
+                if (!commands) {
+                    free(cmd);
+                    success = false;
+                    goto done;
+                }
+                config->startup_commands = commands;
+            }
+            config->startup_commands[config->startup_command_count++] = cmd;
+            need_separator = true;
         }
     }
-
-    config->startup_command_count = count;
-    return true;
+    if (in_array || ferror(f))
+        success = false;
+done:
+    free(line);
+    if (!success)
+        wlr_log(WLR_ERROR, "Config: invalid startup array");
+    return success;
 }
 
 /*
@@ -404,11 +408,7 @@ static bool parse_keybind_key_string(const char *str, uint32_t *modifiers,
         /* Trim whitespace */
         while (*token && isspace((unsigned char)*token))
             token++;
-        char *end = token + strlen(token) - 1;
-        while (end > token && isspace((unsigned char)*end)) {
-            *end = '\0';
-            end--;
-        }
+        trim_trailing(token);
 
         if (*token) {
             tokens[token_count++] = token;
@@ -416,7 +416,7 @@ static bool parse_keybind_key_string(const char *str, uint32_t *modifiers,
         token = strtok_r(NULL, "+", &saveptr);
     }
 
-    if (token_count == 0) {
+    if (token_count == 0 || token) {
         free(copy);
         return false;
     }
@@ -503,6 +503,11 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
     bool in_section = false;
     int capacity = INITIAL_KEYBINDS_CAPACITY;
 
+    for (int i = 0; i < config->keybind_count; i++) {
+        free(config->keybinds[i].value);
+    }
+    free(config->keybinds);
+    config->keybind_count = 0;
     config->keybinds = malloc(capacity * sizeof(struct keybind));
     if (!config->keybinds) {
         return false;
@@ -606,6 +611,12 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
  * This ensures the compositor always has a working set of bindings.
  */
 static void config_set_default_keybinds(struct infinidesk_config *config) {
+    for (int i = 0; i < config->keybind_count; i++) {
+        free(config->keybinds[i].value);
+    }
+    free(config->keybinds);
+    config->keybinds = NULL;
+    config->keybind_count = 0;
     static const struct {
         const char *key_str;
         const char *value;
@@ -666,8 +677,13 @@ static bool parse_float_value(const char *line, const char *key, float *value) {
 
     p = skip_whitespace(p + 1);
     char *end;
+    errno = 0;
     float v = strtof(p, &end);
-    if (end == p) {
+    bool has_digits = end != p;
+    end = skip_whitespace(end);
+    if (!has_digits || errno != 0 || !isfinite(v) || v < 0.5f || v > 4.0f ||
+        (*end != '\0' && *end != '#')) {
+        wlr_log(WLR_ERROR, "Config: invalid %s (expected 0.5..4)", key);
         return false;
     }
 
@@ -737,6 +753,8 @@ bool config_load(struct infinidesk_config *config) {
     config->wheel_speed = 1.0;
     config->gesture_speed = 1.0;
 
+    config_set_default_keybinds(config);
+
     char *path = get_config_path();
     if (!path) {
         return false;
@@ -764,6 +782,7 @@ bool config_load(struct infinidesk_config *config) {
     char line[MAX_LINE_LENGTH];
     bool in_snapping = false;
     bool in_scroll = false;
+    bool in_section = false;
     while (fgets(line, sizeof(line), f)) {
         char *p = skip_whitespace(line);
 
@@ -775,6 +794,12 @@ bool config_load(struct infinidesk_config *config) {
         trim_trailing(p);
 
         if (*p == '[') {
+            char *comment = strchr(p, '#');
+            if (comment) {
+                *comment = '\0';
+                trim_trailing(p);
+            }
+            in_section = true;
             in_snapping = strcmp(p, "[snapping]") == 0;
             in_scroll = strcmp(p, "[scroll]") == 0;
             continue;
@@ -800,7 +825,7 @@ bool config_load(struct infinidesk_config *config) {
 
         /* Parse scale */
         float scale_value;
-        if (parse_float_value(p, "scale", &scale_value)) {
+        if (!in_section && parse_float_value(p, "scale", &scale_value)) {
             config->scale = scale_value;
             wlr_log(WLR_INFO, "Config: scale = %.2f", config->scale);
         }
@@ -813,6 +838,7 @@ bool config_load(struct infinidesk_config *config) {
     if (!success) {
         fclose(f);
         config_free(config);
+        config_set_default_keybinds(config);
         return false;
     }
 
@@ -850,20 +876,24 @@ void config_free(struct infinidesk_config *config) {
     config->keybind_count = 0;
 }
 
+void config_run_command(const char *command) {
+    wlr_log(WLR_INFO, "Executing: %s", command);
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Wayland signal event sources block signals in the parent thread. */
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigprocmask(SIG_SETMASK, &mask, NULL);
+        signal(SIGCHLD, SIG_DFL);
+        execl("/bin/sh", "/bin/sh", "-c", command, (char *)NULL);
+        _exit(EXIT_FAILURE);
+    } else if (pid < 0) {
+        wlr_log(WLR_ERROR, "Failed to fork: %s", strerror(errno));
+    }
+}
+
 void config_run_startup_commands(struct infinidesk_config *config) {
     for (int i = 0; i < config->startup_command_count; i++) {
-        const char *cmd = config->startup_commands[i];
-        wlr_log(WLR_INFO, "Running startup command: %s", cmd);
-
-        pid_t pid = fork();
-        if (pid == 0) {
-            /* Child process */
-            execl("/bin/sh", "/bin/sh", "-c", cmd, (char *)NULL);
-            /* If execl returns, it failed */
-            wlr_log(WLR_ERROR, "Failed to execute: %s", cmd);
-            _exit(EXIT_FAILURE);
-        } else if (pid < 0) {
-            wlr_log(WLR_ERROR, "Failed to fork for command: %s", cmd);
-        }
+        config_run_command(config->startup_commands[i]);
     }
 }

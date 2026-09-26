@@ -64,7 +64,8 @@ struct infinidesk_config {
  * Load configuration from the default config file.
  * Creates the config file and parent directories if they don't exist.
  *
- * Config file location: ~/.config/infinidesk/infinidesk.toml
+ * Config file location: $XDG_CONFIG_HOME/infinidesk/infinidesk.toml,
+ * falling back to ~/.config/infinidesk/infinidesk.toml.
  *
  * Returns true on success (including if file doesn't exist and was created),
  * false on error.
@@ -80,6 +81,8 @@ void config_free(struct infinidesk_config *config);
  * Run all startup commands from the configuration.
  * Each command is executed in a forked process.
  */
+void config_run_command(const char *command);
+
 void config_run_startup_commands(struct infinidesk_config *config);
 
 #endif /* INFINIDESK_CONFIG_H */

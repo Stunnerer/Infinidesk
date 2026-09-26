@@ -48,9 +48,10 @@ static void print_usage(const char *prog_name) {
             prog_name);
 }
 
-static void handle_signal(int sig) {
+static int handle_signal(int sig, void *data) {
     (void)sig;
-    wl_display_terminate(server.wl_display);
+    wl_display_terminate(data);
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -84,9 +85,11 @@ int main(int argc, char *argv[]) {
     wlr_log_init(log_level, NULL);
     wlr_log(WLR_INFO, "Starting Infinidesk");
 
-    /* Set up signal handlers */
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
+    /* Reap shell children automatically. */
+    struct sigaction child_action = {.sa_handler = SIG_IGN,
+                                     .sa_flags = SA_NOCLDWAIT};
+    sigemptyset(&child_action.sa_mask);
+    sigaction(SIGCHLD, &child_action, NULL);
 
     /* Initialise the server */
     if (!server_init(&server)) {
@@ -94,33 +97,46 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
+    struct wl_event_source *sigint_source = wl_event_loop_add_signal(
+        server.event_loop, SIGINT, handle_signal, server.wl_display);
+    struct wl_event_source *sigterm_source = wl_event_loop_add_signal(
+        server.event_loop, SIGTERM, handle_signal, server.wl_display);
+    if (!sigint_source || !sigterm_source) {
+        if (sigint_source)
+            wl_event_source_remove(sigint_source);
+        if (sigterm_source)
+            wl_event_source_remove(sigterm_source);
+        server_finish(&server);
+        return EXIT_FAILURE;
+    }
+
     /* Load configuration file (before server_start so output scale is set) */
     struct infinidesk_config config;
     if (!config_load(&config)) {
         wlr_log(WLR_ERROR, "Failed to load config, continuing with defaults");
-        /* server.output_scale already set to 1.0f in server_init */
-    } else {
-        server.output_scale = config.scale;
-        server.snap_screen_px = config.snap_screen_px;
-        server.snap_window_px = config.snap_window_px;
-        server.wheel_speed = config.wheel_speed;
-        server.gesture_speed = config.gesture_speed;
-
-        /*
-         * Transfer keybind ownership from config to server.
-         * We steal the pointer so config_free() won't free it while
-         * the server is still running.
-         */
-        server.keybinds = config.keybinds;
-        server.keybind_count = config.keybind_count;
-        config.keybinds = NULL;
-        config.keybind_count = 0;
     }
+    server.output_scale = config.scale;
+    server.snap_screen_px = config.snap_screen_px;
+    server.snap_window_px = config.snap_window_px;
+    server.wheel_speed = config.wheel_speed;
+    server.gesture_speed = config.gesture_speed;
+
+    /*
+     * Transfer keybind ownership from config to server.
+     * We steal the pointer so config_free() won't free it while
+     * the server is still running.
+     */
+    server.keybinds = config.keybinds;
+    server.keybind_count = config.keybind_count;
+    config.keybinds = NULL;
+    config.keybind_count = 0;
 
     /* Start the backend */
     if (!server_start(&server)) {
         wlr_log(WLR_ERROR, "Failed to start server");
         config_free(&config);
+        wl_event_source_remove(sigint_source);
+        wl_event_source_remove(sigterm_source);
         server_finish(&server);
         return EXIT_FAILURE;
     }
@@ -130,12 +146,7 @@ int main(int argc, char *argv[]) {
 
     /* Run command-line startup command if specified (in addition to config) */
     if (startup_cmd) {
-        wlr_log(WLR_INFO, "Running command-line startup command: %s",
-                startup_cmd);
-        if (fork() == 0) {
-            execl("/bin/sh", "/bin/sh", "-c", startup_cmd, (char *)NULL);
-            _exit(EXIT_FAILURE);
-        }
+        config_run_command(startup_cmd);
     }
 
     /* Run the event loop */
@@ -145,6 +156,8 @@ int main(int argc, char *argv[]) {
     /* Clean up */
     wlr_log(WLR_INFO, "Shutting down");
     config_free(&config);
+    wl_event_source_remove(sigint_source);
+    wl_event_source_remove(sigterm_source);
     server_finish(&server);
 
     return EXIT_SUCCESS;
