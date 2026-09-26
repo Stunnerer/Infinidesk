@@ -102,6 +102,9 @@ jobs:
       - name: Build Infinidesk
         run: ninja -C build
 
+      - name: Run regression tests
+        run: meson test -C build --print-errorlogs
+
       - name: Build .deb package
         run: |
           set -e
@@ -121,6 +124,14 @@ jobs:
           # Use find since the install path varies by architecture.
           find /usr/lib -name 'libwlroots-0.18.so*' -exec cp -P {} "$LIB_DIR/" \;
           find /usr/lib -name 'libwayland-server.so.0*' -exec cp -P {} "$LIB_DIR/" \;
+          find /usr/lib -name 'libwayland-client.so.0*' -exec cp -P {} "$LIB_DIR/" \;
+          for library in "$LIB_DIR"/libwlroots-0.18.so*; do
+            if [ ! -L "$library" ]; then
+              patchelf --set-rpath '$ORIGIN' "$library"
+            fi
+          done
+          mkdir -p "$PKG/usr/share/wayland-sessions"
+          cp infinidesk.desktop "$PKG/usr/share/wayland-sessions/"
 
           echo "=== Bundled libraries ==="
           ls -la "$LIB_DIR/"

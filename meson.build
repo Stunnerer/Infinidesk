@@ -11,9 +11,9 @@ project('infinidesk', 'c',
 cc = meson.get_compiler('c')
 
 # Dependencies
-wlroots = dependency('wlroots-0.18', version: '>= 0.18.0', required: false)
+wlroots = dependency('wlroots-0.18', version: ['>= 0.18.0', '< 0.19.0'], required: false)
 if not wlroots.found()
-  wlroots = dependency('wlroots', version: '>= 0.18.0')
+  wlroots = dependency('wlroots', version: ['>= 0.18.0', '< 0.19.0'])
 endif
 
 wayland_server = dependency('wayland-server')
@@ -92,7 +92,6 @@ infinidesk_inc = include_directories('include')
 
 # Source files
 infinidesk_sources = files(
-  'src/main.c',
   'src/server.c',
   'src/config.c',
   'src/canvas.c',
@@ -115,8 +114,12 @@ add_project_arguments(
   language: 'c',
 )
 
-# Main executable
-executable('infinidesk',
+infinidesk_dependencies = [
+  wlroots, wayland_server, wayland_client, xkbcommon, pixman,
+  cairo, pangocairo, libdrm, math,
+]
+
+infinidesk_core = static_library('infinidesk-core',
   infinidesk_sources,
   xdg_shell_protocol_h,
   fractional_scale_client_h,
@@ -125,19 +128,47 @@ executable('infinidesk',
   viewporter_client_c,
   wlr_layer_shell_protocol_h,
   include_directories: infinidesk_inc,
-  dependencies: [
-    wlroots,
-    wayland_server,
-    wayland_client,
-    xkbcommon,
-    pixman,
-    cairo,
-    pangocairo,
-    libdrm,
-    math,
-  ],
+  dependencies: infinidesk_dependencies,
+)
+
+executable('infinidesk', 'src/main.c',
+  xdg_shell_protocol_h, wlr_layer_shell_protocol_h,
+  link_with: infinidesk_core,
+  include_directories: infinidesk_inc,
+  dependencies: infinidesk_dependencies,
   install: true,
 )
+
+test_xdg_header = custom_target('xdg-shell-client-protocol.h',
+  input: xdg_shell_xml, output: 'xdg-shell-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+test_xdg_code = custom_target('xdg-shell-client-protocol.c',
+  input: xdg_shell_xml, output: 'xdg-shell-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+test_layer_header = custom_target('layer-shell-client-protocol.h',
+  input: wlr_layer_shell_xml, output: 'layer-shell-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+test_layer_code = custom_target('layer-shell-client-protocol.c',
+  input: wlr_layer_shell_xml, output: 'layer-shell-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+protocol_client = executable('test-protocol-client', 'tests/protocol-client.c',
+  test_xdg_header, test_xdg_code, test_layer_header, test_layer_code,
+  dependencies: wayland_client)
+
+foreach test_name : ['config', 'core']
+  test_binary = executable('test-' + test_name, 'tests/' + test_name + '.c',
+    xdg_shell_protocol_h, wlr_layer_shell_protocol_h,
+    link_with: infinidesk_core,
+    include_directories: infinidesk_inc,
+    dependencies: infinidesk_dependencies,
+  )
+  if test_name == 'core'
+    test(test_name, test_binary, args: [protocol_client.full_path()],
+      depends: protocol_client, timeout: 15)
+  else
+    test(test_name, test_binary, timeout: 15)
+  endif
+endforeach
 
 install_data(
   'infinidesk.desktop',
