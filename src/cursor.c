@@ -224,6 +224,12 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
     bool consumed =
         event->button <= KEY_MAX && server->consumed_buttons[event->button];
 
+    if (server->seat->drag) {
+        wlr_seat_pointer_notify_button(server->seat, event->time_msec,
+                                       event->button, event->state);
+        return;
+    }
+
     if (!pressed) {
         if (event->button <= KEY_MAX) {
             server->consumed_buttons[event->button] = false;
@@ -497,7 +503,9 @@ void cursor_handle_request_cursor(struct wl_listener *listener, void *data) {
     struct wlr_seat_client *focused_client =
         server->seat->pointer_state.focused_client;
 
-    if (focused_client == event->seat_client) {
+    if (focused_client == event->seat_client ||
+        (server->seat->drag &&
+         server->seat->drag->seat_client == event->seat_client)) {
         /* Set the cursor surface from the client */
         wlr_cursor_set_surface(server->cursor, event->surface, event->hotspot_x,
                                event->hotspot_y);
@@ -505,6 +513,31 @@ void cursor_handle_request_cursor(struct wl_listener *listener, void *data) {
 }
 
 void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
+    if (server->seat->drag) {
+        /* Use the same canvas hit testing as normal input, without changing
+         * keyboard focus or replacing the client's drag cursor. */
+        double sx = 0, sy = 0;
+        struct wlr_surface *surface = NULL;
+        struct infinidesk_output *output =
+            output_at(server, server->cursor->x, server->cursor->y);
+        if (output) {
+            layer_surface_at(output, server->cursor->x, server->cursor->y,
+                             &surface, &sx, &sy);
+        }
+        if (!surface && !server->drawing.drawing_mode) {
+            server_view_at(server, server->cursor->x, server->cursor->y,
+                           &surface, &sx, &sy);
+        }
+        if (surface) {
+            wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
+        } else {
+            wlr_seat_pointer_notify_clear_focus(server->seat);
+        }
+        wlr_seat_pointer_notify_motion(server->seat, time, sx, sy);
+        output_schedule_frames(server);
+        return;
+    }
+
     switch (server->cursor_mode) {
     case INFINIDESK_CURSOR_MOVE: {
         /* Update the view position during move */

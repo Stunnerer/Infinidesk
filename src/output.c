@@ -46,6 +46,8 @@ static const float bg_colour[4] = {0.18f, 0.18f, 0.18f, 1.0f};
 
 /* Forward declarations */
 static void output_render_custom(struct infinidesk_output *output);
+static void render_drag_icon(struct infinidesk_output *output,
+                             struct wlr_render_pass *pass);
 static void send_frame_done_iterator(struct wlr_surface *surface, int sx,
                                      int sy, void *data);
 static void render_layer_surfaces(struct infinidesk_output *output,
@@ -477,6 +479,8 @@ static void output_render_custom(struct infinidesk_output *output) {
     /* Render alt-tab switcher overlay */
     switcher_render(&server->switcher, pass, width, height, output_scale);
 
+    render_drag_icon(output, pass);
+
     wlr_output_add_software_cursors_to_render_pass(wlr_output, pass, NULL);
     if (!wlr_render_pass_submit(pass)) {
         wlr_output_state_finish(&state);
@@ -506,6 +510,12 @@ static void output_render_custom(struct infinidesk_output *output) {
             wlr_xdg_surface_for_each_popup_surface(
                 view->xdg_toplevel->base, send_frame_done_iterator, &now);
         }
+    }
+
+    if (server->seat->drag && server->seat->drag->icon &&
+        server->seat->drag->icon->surface->mapped) {
+        wlr_surface_for_each_surface(server->seat->drag->icon->surface,
+                                    send_frame_done_iterator, &now);
     }
 
     /* Send frame done to layer surfaces */
@@ -787,6 +797,25 @@ static void render_layer_surface_iterator(struct wlr_surface *surface, int sx,
  * Render all layer surfaces in a given layer.
  * Layer surfaces are rendered at fixed screen positions (no canvas transform).
  */
+static void render_drag_icon(struct infinidesk_output *output,
+                             struct wlr_render_pass *pass) {
+    struct infinidesk_server *server = output->server;
+    struct wlr_drag *drag = server->seat->drag;
+    if (!drag || !drag->icon || !drag->icon->surface->mapped) {
+        return;
+    }
+    struct wlr_box box;
+    output_get_box(output, &box);
+    struct layer_render_data data = {
+        .pass = pass,
+        .x = (int)lround(server->cursor->x + server->drag_icon_x - box.x),
+        .y = (int)lround(server->cursor->y + server->drag_icon_y - box.y),
+        .output_scale = output->wlr_output->scale,
+    };
+    wlr_surface_for_each_surface(drag->icon->surface,
+                                render_layer_surface_iterator, &data);
+}
+
 static void render_layer_surfaces(struct infinidesk_output *output,
                                   struct wlr_render_pass *pass,
                                   enum zwlr_layer_shell_v1_layer layer) {

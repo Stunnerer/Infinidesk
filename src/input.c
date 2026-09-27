@@ -19,6 +19,7 @@
 
 #include "infinidesk/input.h"
 #include "infinidesk/keyboard.h"
+#include "infinidesk/output.h"
 #include "infinidesk/server.h"
 
 static void handle_request_set_selection(struct wl_listener *listener,
@@ -39,6 +40,41 @@ static void handle_request_set_primary_selection(struct wl_listener *listener,
     wlr_seat_set_primary_selection(server->seat, event->source, event->serial);
 }
 
+static void handle_drag_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct infinidesk_server *server =
+        wl_container_of(listener, server, drag_destroy);
+    wl_list_remove(&server->drag_destroy.link);
+    wl_list_init(&server->drag_destroy.link);
+    output_schedule_frames(server);
+}
+
+static void handle_request_start_drag(struct wl_listener *listener, void *data) {
+    struct infinidesk_server *server =
+        wl_container_of(listener, server, request_start_drag);
+    struct wlr_seat_request_start_drag_event *event = data;
+
+    if (server->seat->drag ||
+        server->cursor_mode != INFINIDESK_CURSOR_PASSTHROUGH ||
+        !wlr_seat_validate_pointer_grab_serial(server->seat, event->origin,
+                                              event->serial)) {
+        if (event->drag->source) {
+            wlr_data_source_destroy(event->drag->source);
+        }
+        return;
+    }
+
+    server->drag_icon_x = server->drag_icon_y = 0;
+    if (event->drag->icon) {
+        server->drag_icon_x = event->drag->icon->surface->current.dx;
+        server->drag_icon_y = event->drag->icon->surface->current.dy;
+    }
+    server->drag_destroy.notify = handle_drag_destroy;
+    wl_signal_add(&event->drag->events.destroy, &server->drag_destroy);
+    wlr_seat_start_pointer_drag(server->seat, event->drag, event->serial);
+    output_schedule_frames(server);
+}
+
 void input_init(struct infinidesk_server *server) {
     /* Create the seat */
     server->seat = wlr_seat_create(server->wl_display, "seat0");
@@ -46,6 +82,10 @@ void input_init(struct infinidesk_server *server) {
         wlr_log(WLR_ERROR, "Failed to create seat");
         return;
     }
+
+    server->request_start_drag.notify = handle_request_start_drag;
+    wl_signal_add(&server->seat->events.request_start_drag,
+                  &server->request_start_drag);
 
     server->request_set_selection.notify = handle_request_set_selection;
     wl_signal_add(&server->seat->events.request_set_selection,

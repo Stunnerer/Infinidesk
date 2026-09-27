@@ -42,6 +42,36 @@ static void init_view(struct test_view *item, struct infinidesk_server *server,
     wl_list_insert(server->views.prev, &item->view.link);
 }
 
+static struct wlr_surface *drag_target;
+static double drag_sx, drag_sy;
+
+static void drag_enter(struct wlr_seat_pointer_grab *grab,
+                       struct wlr_surface *surface, double sx, double sy) {
+    (void)grab;
+    drag_target = surface;
+    drag_sx = sx;
+    drag_sy = sy;
+}
+
+static void drag_clear_focus(struct wlr_seat_pointer_grab *grab) {
+    (void)grab;
+    drag_target = NULL;
+}
+
+static void drag_motion(struct wlr_seat_pointer_grab *grab, uint32_t time,
+                        double sx, double sy) {
+    (void)grab;
+    (void)time;
+    drag_sx = sx;
+    drag_sy = sy;
+}
+
+static const struct wlr_pointer_grab_interface test_drag_interface = {
+    .enter = drag_enter,
+    .clear_focus = drag_clear_focus,
+    .motion = drag_motion,
+};
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     setenv("WLR_BACKENDS", "headless", 1);
@@ -93,6 +123,35 @@ int main(int argc, char **argv) {
     server.canvas.snap_anim_active = true;
     canvas_pan_delta(&server.canvas, 2, 3);
     assert(!server.canvas.snap_anim_active);
+    /* Drag targets use canvas coordinates and leave through the active grab,
+     * even near resize borders, without changing keyboard focus. */
+    double saved_scale = server.canvas.scale;
+    server.canvas.scale = 0.5;
+    struct wlr_drag drag = {0};
+    struct wlr_seat_pointer_grab grab = {
+        .interface = &test_drag_interface,
+        .seat = server.seat,
+    };
+    struct wlr_seat_pointer_grab *saved_grab = server.seat->pointer_state.grab;
+    server.seat->pointer_state.grab = &grab;
+    server.seat->drag = &drag;
+    double cursor_x = server.cursor->x, cursor_y = server.cursor->y;
+    canvas_to_screen(&server.canvas, 51, 51, &server.cursor->x,
+                     &server.cursor->y);
+    cursor_process_motion(&server, 1);
+    assert(drag_target == &items[2].surface);
+    assert(fabs(drag_sx - 1) < 0.001 && fabs(drag_sy - 1) < 0.001);
+    assert(server.seat->keyboard_state.focused_surface == NULL);
+    canvas_to_screen(&server.canvas, -100, -100, &server.cursor->x,
+                     &server.cursor->y);
+    cursor_process_motion(&server, 2);
+    assert(drag_target == NULL);
+    server.seat->drag = NULL;
+    server.seat->pointer_state.grab = saved_grab;
+    server.canvas.scale = saved_scale;
+    server.cursor->x = cursor_x;
+    server.cursor->y = cursor_y;
+
     double scale = server.canvas.scale;
     canvas_zoom(&server.canvas, NAN, 10, 10);
     assert(server.canvas.scale == scale);

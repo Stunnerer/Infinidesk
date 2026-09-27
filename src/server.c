@@ -49,12 +49,18 @@ struct surface_damage_listener {
 };
 
 static void surface_committed(struct wl_listener *listener, void *data) {
-    (void)data;
     struct surface_damage_listener *tracking =
         wl_container_of(listener, tracking, commit);
     /* Scene visibility differs from our scaled canvas, including subsurfaces.
      */
-    output_schedule_frames(tracking->server);
+    struct infinidesk_server *server = tracking->server;
+    struct wlr_surface *surface = data;
+    if (server->seat && server->seat->drag && server->seat->drag->icon &&
+        server->seat->drag->icon->surface == surface) {
+        server->drag_icon_x += surface->current.dx;
+        server->drag_icon_y += surface->current.dy;
+    }
+    output_schedule_frames(server);
 }
 
 static void surface_destroyed(struct wl_listener *listener, void *data) {

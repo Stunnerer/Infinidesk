@@ -82,6 +82,9 @@ struct infinidesk_server {
     struct wl_list keyboards; /* infinidesk_keyboard.link */
     struct wl_listener new_input;
     struct wl_listener request_cursor;
+    struct wl_listener request_start_drag;
+    struct wl_listener drag_destroy;
+    double drag_icon_x, drag_icon_y;
     struct wl_listener request_set_selection;
     struct wl_listener request_set_primary_selection;
 

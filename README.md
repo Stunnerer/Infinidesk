@@ -12,6 +12,7 @@ Infinidesk is a new, **spatially-oriented** way to navigate your desktop. Drawin
 
 ## Key features
 
+- **Drag-and-drop:** Transfer files and text between Wayland apps with a drag icon that follows the pointer, including on a zoomed canvas.
 - **Wayland-native:** Supports the latest and greatest apps right out of the box.
 - **Touchpad gesture support:** Pan the canvas with two-finger scrolling and pinch to zoom.
 - **Fast navigation:** Use alt+tab to rapidly warp between windows.
