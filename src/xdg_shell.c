@@ -118,24 +118,30 @@ static void popup_unconstrain(struct infinidesk_popup *popup) {
     struct wlr_box box;
     if (xdg && xdg->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL && xdg->data) {
         struct infinidesk_view *view = xdg->data;
-        struct infinidesk_output *output = output_get_active(view->server);
+        struct infinidesk_output *output = NULL;
+        struct infinidesk_output *candidate;
+        wl_list_for_each(candidate, &view->server->outputs, link) {
+            if (candidate->wlr_output == view->fullscreen_output)
+                output = candidate;
+        }
+        if (!output)
+            output = output_get_active(view->server);
         if (!output)
             return;
         output_get_box(output, &box);
-        struct infinidesk_canvas *canvas = &view->server->canvas;
+        double screen_x, screen_y;
+        double scale = view_get_screen_position(view, &screen_x, &screen_y);
         struct wlr_box geo;
         wlr_xdg_surface_get_geometry(xdg, &geo);
-        double left =
-            canvas->viewport_x + box.x / canvas->scale - view->x + geo.x;
-        double top =
-            canvas->viewport_y + box.y / canvas->scale - view->y + geo.y;
+        double left = (box.x - screen_x) / scale + geo.x;
+        double top = (box.y - screen_y) / scale + geo.y;
         box = (struct wlr_box){
             .x = (int)floor(left),
             .y = (int)floor(top),
             .width =
-                (int)ceil(left + box.width / canvas->scale) - (int)floor(left),
+                (int)ceil(left + box.width / scale) - (int)floor(left),
             .height =
-                (int)ceil(top + box.height / canvas->scale) - (int)floor(top),
+                (int)ceil(top + box.height / scale) - (int)floor(top),
         };
     } else {
         struct wlr_layer_surface_v1 *surface =

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "infinidesk/cursor.h"
 #include "infinidesk/keyboard.h"
+#include "infinidesk/layer_shell.h"
 #include "infinidesk/output.h"
 #include "infinidesk/server.h"
 #include "infinidesk/view.h"
@@ -213,6 +214,30 @@ int main(int argc, char **argv) {
     output = output_get_primary(&server);
     assert(wl_list_length(
                &output->layer_surfaces[ZWLR_LAYER_SHELL_V1_LAYER_TOP]) == 1);
+    /* A fullscreen view hides this output's top-layer panel from input,
+     * while unmapping or leaving fullscreen exposes the panel again. */
+    struct infinidesk_layer_surface *panel = wl_container_of(
+        output->layer_surfaces[ZWLR_LAYER_SHELL_V1_LAYER_TOP].next, panel, link);
+    struct infinidesk_view *fullscreen_view =
+        wl_container_of(server.views.next, fullscreen_view, link);
+    output_get_box(output, &box);
+    double panel_x = box.x + panel->scene_tree->node.x + 1;
+    double panel_y = box.y + panel->scene_tree->node.y + 1;
+    struct wlr_surface *panel_surface;
+    double panel_sx, panel_sy;
+    assert(!view_output_has_fullscreen(output));
+    assert(layer_surface_at(output, panel_x, panel_y, &panel_surface,
+                            &panel_sx, &panel_sy) == panel);
+    fullscreen_view->fullscreen_output = output->wlr_output;
+    assert(view_output_has_fullscreen(output));
+    assert(!layer_surface_at(output, panel_x, panel_y, &panel_surface,
+                             &panel_sx, &panel_sy));
+    fullscreen_view->xdg_toplevel->base->surface->mapped = false;
+    assert(!view_output_has_fullscreen(output));
+    fullscreen_view->xdg_toplevel->base->surface->mapped = true;
+    fullscreen_view->fullscreen_output = NULL;
+    assert(layer_surface_at(output, panel_x, panel_y, &panel_surface,
+                            &panel_sx, &panel_sy) == panel);
     wlr_output_destroy(output->wlr_output);
     assert(wl_list_empty(&server.outputs));
     assert(write(command[1], "C", 1) == 1);

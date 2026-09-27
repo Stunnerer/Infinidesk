@@ -247,12 +247,61 @@ void view_set_position(struct infinidesk_view *view, double x, double y) {
     view_update_scene_position(view);
 }
 
-void view_update_scene_position(struct infinidesk_view *view) {
-    struct infinidesk_canvas *canvas = &view->server->canvas;
+bool view_output_has_fullscreen(struct infinidesk_output *output) {
+    struct infinidesk_view *view;
+    wl_list_for_each(view, &output->server->views, link) {
+        if (view->fullscreen_output == output->wlr_output &&
+            view->xdg_toplevel->base->surface->mapped)
+            return true;
+    }
+    return false;
+}
 
-    /* Convert canvas coordinates to screen coordinates */
+static struct infinidesk_output *
+view_fullscreen_output(struct infinidesk_view *view) {
+    struct infinidesk_output *output;
+    wl_list_for_each(output, &view->server->outputs, link) {
+        if (output->wlr_output == view->fullscreen_output && !output->destroying)
+            return output;
+    }
+    return NULL;
+}
+
+double view_get_screen_position(struct infinidesk_view *view, double *x,
+                                double *y) {
+    struct infinidesk_output *output = view_fullscreen_output(view);
+    if (output) {
+        struct wlr_box box;
+        output_get_box(output, &box);
+        *x = box.x;
+        *y = box.y;
+        return 1.0;
+    }
+    canvas_to_screen(&view->server->canvas, view->x, view->y, x, y);
+    return view->server->canvas.scale;
+}
+
+void view_update_scene_position(struct infinidesk_view *view) {
+    if (view->fullscreen_output) {
+        struct infinidesk_output *output = view_fullscreen_output(view);
+        if (output) {
+            struct wlr_box box;
+            output_get_box(output, &box);
+            if (box.width != view->fullscreen_box.width ||
+                box.height != view->fullscreen_box.height) {
+                wlr_xdg_toplevel_set_size(view->xdg_toplevel, box.width,
+                                          box.height);
+            }
+            view->fullscreen_box = box;
+        } else {
+            view->fullscreen_output = NULL;
+            wlr_xdg_toplevel_set_fullscreen(view->xdg_toplevel, false);
+            wlr_xdg_toplevel_set_size(view->xdg_toplevel, view->restore_width,
+                                      view->restore_height);
+        }
+    }
     double screen_x, screen_y;
-    canvas_to_screen(canvas, view->x, view->y, &screen_x, &screen_y);
+    view_get_screen_position(view, &screen_x, &screen_y);
 
     /* The XDG scene helper already applies the geometry offset. */
 
@@ -374,6 +423,9 @@ static bool snap_resize_edge(struct infinidesk_view *view, bool horizontal,
 
 void view_move_begin(struct infinidesk_view *view, double cursor_x,
                      double cursor_y) {
+    if (view->fullscreen_output)
+        return;
+
     view->server->canvas.snap_anim_active = false;
     view->is_moving = true;
     view->grab_x = cursor_x;
@@ -446,6 +498,9 @@ void view_move_end(struct infinidesk_view *view) {
 
 void view_resize_begin(struct infinidesk_view *view, uint32_t edges,
                        double cursor_x, double cursor_y) {
+    if (view && view->fullscreen_output)
+        return;
+
     if (!view || view->is_resizing) {
         return;
     }
@@ -867,6 +922,7 @@ static void handle_unmap(struct wl_listener *listener, void *data) {
             }
         }
     }
+    view->fullscreen_output = NULL;
     view->is_resizing = false;
     view->resize_configure_serial = 0;
     view->resize_finish_serial = 0;
@@ -897,7 +953,12 @@ static void handle_commit(struct wl_listener *listener, void *data) {
 
     if (view->xdg_toplevel->base->initial_commit) {
         /* Schedule configure for initial commit */
-        wlr_xdg_toplevel_set_size(view->xdg_toplevel, 0, 0);
+        wlr_xdg_toplevel_set_wm_capabilities(
+            view->xdg_toplevel, WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN);
+        if (view->xdg_toplevel->requested.fullscreen)
+            handle_request_fullscreen(&view->request_fullscreen, NULL);
+        else
+            wlr_xdg_toplevel_set_size(view->xdg_toplevel, 0, 0);
     }
 
     if (!view->xdg_toplevel->base->surface->mapped) {
@@ -1007,10 +1068,54 @@ static void handle_request_fullscreen(struct wl_listener *listener,
     struct infinidesk_view *view =
         wl_container_of(listener, view, request_fullscreen);
 
-    /* Fullscreen could be implemented to zoom to fill the viewport */
-    wlr_log(WLR_DEBUG, "View %p requested fullscreen (not implemented)",
-            (void *)view);
-    wlr_xdg_surface_schedule_configure(view->xdg_toplevel->base);
+    struct infinidesk_output *output = NULL;
+    if (view->xdg_toplevel->requested.fullscreen) {
+        struct infinidesk_output *candidate;
+        wl_list_for_each(candidate, &view->server->outputs, link) {
+            if (candidate->wlr_output ==
+                view->xdg_toplevel->requested.fullscreen_output &&
+                !candidate->destroying) {
+                output = candidate;
+                break;
+            }
+        }
+        if (!output)
+            output = output_get_active(view->server);
+    }
+    if (output) {
+        if (!view->fullscreen_output) {
+            struct wlr_box geo;
+            wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo);
+            view->restore_width = geo.width;
+            view->restore_height = geo.height;
+        }
+        view->is_moving = false;
+        view->is_resizing = false;
+        view->resize_configure_serial = 0;
+        view->resize_finish_serial = 0;
+        view->resize_anchor_edges = WLR_EDGE_NONE;
+        wlr_xdg_toplevel_set_resizing(view->xdg_toplevel, false);
+        if (view->server->grabbed_view == view) {
+            view->server->grabbed_view = NULL;
+            view->server->cursor_mode = INFINIDESK_CURSOR_PASSTHROUGH;
+        }
+        view->fullscreen_output = output->wlr_output;
+        output_get_box(output, &view->fullscreen_box);
+        wlr_xdg_toplevel_set_size(view->xdg_toplevel,
+                                  view->fullscreen_box.width,
+                                  view->fullscreen_box.height);
+        if (view->xdg_toplevel->base->surface->mapped) {
+            view_raise(view);
+            view_focus(view);
+        }
+    } else if (view->fullscreen_output) {
+        view->fullscreen_output = NULL;
+        wlr_xdg_toplevel_set_size(view->xdg_toplevel, view->restore_width,
+                                  view->restore_height);
+    }
+    wlr_xdg_toplevel_set_fullscreen(view->xdg_toplevel, output != NULL);
+    view_update_scene_position(view);
+    output_schedule_frames(view->server);
 }
 
 static void handle_set_title(struct wl_listener *listener, void *data) {
@@ -1364,7 +1469,6 @@ static void render_border(struct wlr_render_pass *pass, int x, int y, int width,
 
 void view_render(struct infinidesk_view *view, struct wlr_render_pass *pass,
                  float output_scale, int output_x, int output_y) {
-    struct infinidesk_canvas *canvas = &view->server->canvas;
     struct wlr_xdg_surface *xdg_surface = view->xdg_toplevel->base;
 
     if (!xdg_surface->surface->mapped) {
@@ -1384,12 +1488,10 @@ void view_render(struct infinidesk_view *view, struct wlr_render_pass *pass,
      * Combined scale: canvas scale (zoom level) * output scale (HiDPI) *
      * animation scale. All rendering coordinates must be in physical pixels.
      */
-    double base_scale = canvas->scale * output_scale;
-    double combined_scale = base_scale * anim_scale;
-
-    /* Convert canvas coordinates to screen coordinates (logical) */
     double screen_x, screen_y;
-    canvas_to_screen(canvas, view->x, view->y, &screen_x, &screen_y);
+    double base_scale =
+        view_get_screen_position(view, &screen_x, &screen_y) * output_scale;
+    double combined_scale = base_scale * anim_scale;
 
     /* Convert to physical pixels */
     screen_x = (screen_x - output_x) * output_scale;
@@ -1408,7 +1510,8 @@ void view_render(struct infinidesk_view *view, struct wlr_render_pass *pass,
 
     /* Calculate scaled dimensions (in physical pixels, with animation scale) */
     int scaled_border = (int)round(BORDER_WIDTH * combined_scale);
-    int scaled_radius = (int)round(CORNER_RADIUS * combined_scale);
+    int scaled_radius =
+        view->fullscreen_output ? 0 : (int)round(CORNER_RADIUS * combined_scale);
     int content_width = (int)round(geo.width * combined_scale);
     int content_height = (int)round(geo.height * combined_scale);
 
@@ -1496,15 +1599,15 @@ void view_render(struct infinidesk_view *view, struct wlr_render_pass *pass,
     pixman_region32_fini(&clip);
 
     /* 3. Render the border on top of everything */
-    render_border(pass, border_x, border_y, border_width, border_height,
-                  scaled_border, border_corner_radius, border_r, border_g,
-                  border_b, border_a);
+    if (!view->fullscreen_output)
+        render_border(pass, border_x, border_y, border_width, border_height,
+                      scaled_border, border_corner_radius, border_r, border_g,
+                      border_b, border_a);
 }
 
 void view_render_popups(struct infinidesk_view *view,
                         struct wlr_render_pass *pass, float output_scale,
                         int output_x, int output_y) {
-    struct infinidesk_canvas *canvas = &view->server->canvas;
     struct wlr_xdg_surface *xdg_surface = view->xdg_toplevel->base;
 
     if (!xdg_surface->surface->mapped) {
@@ -1515,11 +1618,9 @@ void view_render_popups(struct infinidesk_view *view,
      * Use the same scale as the parent view (no animation scaling for popups).
      * Popups should appear at full opacity immediately.
      */
-    double combined_scale = canvas->scale * output_scale;
-
-    /* Convert canvas coordinates to screen coordinates (logical) */
     double screen_x, screen_y;
-    canvas_to_screen(canvas, view->x, view->y, &screen_x, &screen_y);
+    double combined_scale =
+        view_get_screen_position(view, &screen_x, &screen_y) * output_scale;
 
     /* Convert to physical pixels */
     screen_x = (screen_x - output_x) * output_scale;

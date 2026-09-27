@@ -19,6 +19,7 @@
 /* Forward declaration */
 struct infinidesk_server;
 struct infinidesk_canvas;
+struct infinidesk_output;
 
 /* Animation duration in milliseconds */
 #define VIEW_FOCUS_ANIM_DURATION_MS 200
@@ -43,6 +44,12 @@ struct infinidesk_view {
     /* Position in canvas coordinates */
     double x;
     double y;
+
+    /* Fullscreen is pinned to an output, independently of the canvas. */
+    struct wlr_output *fullscreen_output;
+    int restore_width;
+    int restore_height;
+    struct wlr_box fullscreen_box;
 
     /* Last known geometry offset (for detecting CSD geometry changes) */
     int last_geo_x;
@@ -139,6 +146,13 @@ void view_set_position(struct infinidesk_view *view, double x, double y);
  * and the current viewport.
  */
 void view_update_scene_position(struct infinidesk_view *view);
+
+/* Whether fullscreen views hide the top layer on this output. */
+bool view_output_has_fullscreen(struct infinidesk_output *output);
+
+/* Shared logical screen transform for rendering, input and popups. */
+double view_get_screen_position(struct infinidesk_view *view, double *x,
+                                double *y);
 
 /*
  * Begin an interactive move operation.

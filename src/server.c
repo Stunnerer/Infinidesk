@@ -400,7 +400,6 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
         sx = &ignored_sx;
     if (!sy)
         sy = &ignored_sy;
-    struct infinidesk_canvas *canvas = &server->canvas;
 
     /* Popups can extend outside their parent window. They are rendered above
      * every toplevel, so hit-test them first in the same stacking order. */
@@ -412,9 +411,9 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
         struct wlr_box geo;
         wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo);
         double screen_x, screen_y;
-        canvas_to_screen(canvas, view->x, view->y, &screen_x, &screen_y);
-        double root_x = (lx - screen_x) / canvas->scale + geo.x;
-        double root_y = (ly - screen_y) / canvas->scale + geo.y;
+        double scale = view_get_screen_position(view, &screen_x, &screen_y);
+        double root_x = (lx - screen_x) / scale + geo.x;
+        double root_y = (ly - screen_y) / scale + geo.y;
         struct wlr_surface *popup_surface =
             wlr_xdg_surface_popup_surface_at(view->xdg_toplevel->base,
                                              root_x, root_y, sx, sy);
@@ -436,7 +435,7 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
 
         /* view->x/y are the window geometry origin, not the buffer origin. */
         double screen_x, screen_y;
-        canvas_to_screen(canvas, view->x, view->y, &screen_x, &screen_y);
+        double scale = view_get_screen_position(view, &screen_x, &screen_y);
 
         /* Hit-test the window geometry; popup surfaces were checked above. */
         double render_x = screen_x;
@@ -446,8 +445,8 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
          * The rendered size on screen. We use the geometry dimensions
          * (the "window" portion) scaled by canvas scale.
          */
-        double render_width = geo.width * canvas->scale;
-        double render_height = geo.height * canvas->scale;
+        double render_width = geo.width * scale;
+        double render_height = geo.height * scale;
 
         /* Check if cursor (in screen coords) is within rendered geometry bounds
          */
@@ -461,8 +460,8 @@ struct infinidesk_view *server_view_at(struct infinidesk_server *server,
              * (render_x, render_y), divided by scale, gives us the position
              * relative to the content origin (geometry origin).
              */
-            double content_local_x = (lx - render_x) / canvas->scale;
-            double content_local_y = (ly - render_y) / canvas->scale;
+            double content_local_x = (lx - render_x) / scale;
+            double content_local_y = (ly - render_y) / scale;
 
             /*
              * Use wlr_xdg_surface_surface_at to find the actual surface
@@ -509,8 +508,6 @@ uint32_t server_view_edge_at(struct infinidesk_server *server, double lx,
     const double base_grab_zone = 10.0;
     double grab_zone = base_grab_zone;
 
-    struct infinidesk_canvas *canvas = &server->canvas;
-
     if (view_out) {
         *view_out = NULL;
     }
@@ -532,13 +529,13 @@ uint32_t server_view_edge_at(struct infinidesk_server *server, double lx,
          * server_view_at().
          */
         double screen_x, screen_y;
-        canvas_to_screen(canvas, view->x, view->y, &screen_x, &screen_y);
+        double scale = view_get_screen_position(view, &screen_x, &screen_y);
 
         /* The rendered bounds of the window geometry on screen */
         double render_x = screen_x;
         double render_y = screen_y;
-        double render_width = geo.width * canvas->scale;
-        double render_height = geo.height * canvas->scale;
+        double render_width = geo.width * scale;
+        double render_height = geo.height * scale;
 
         /*
          * Check if cursor is OUTSIDE the window but within the grab zone.
@@ -581,7 +578,7 @@ uint32_t server_view_edge_at(struct infinidesk_server *server, double lx,
             edges |= WLR_EDGE_RIGHT;
         }
 
-        if (edges != WLR_EDGE_NONE) {
+        if (edges != WLR_EDGE_NONE && !view->fullscreen_output) {
             if (view_out) {
                 *view_out = view;
             }

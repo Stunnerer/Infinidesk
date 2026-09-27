@@ -13,6 +13,7 @@ static struct wl_shm *shm;
 static struct xdg_wm_base *shell;
 static struct zwlr_layer_shell_v1 *layer_shell;
 static int configured, layer_closed;
+static int top_width, top_height, top_fullscreen, top_configured;
 static void global(void *data, struct wl_registry *registry, uint32_t name,
                    const char *interface, uint32_t version) {
     (void)data;
@@ -75,9 +76,15 @@ static void top_configure(void *data, struct xdg_toplevel *top, int32_t width,
                           int32_t height, struct wl_array *states) {
     (void)data;
     (void)top;
-    (void)width;
-    (void)height;
-    (void)states;
+    top_width = width;
+    top_height = height;
+    top_fullscreen = 0;
+    uint32_t *state;
+    wl_array_for_each(state, states) {
+        if (*state == XDG_TOPLEVEL_STATE_FULLSCREEN)
+            top_fullscreen = 1;
+    }
+    top_configured++;
 }
 static void top_close(void *data, struct xdg_toplevel *top) {
     (void)data;
@@ -114,6 +121,8 @@ int main(int argc, char **argv) {
     const struct xdg_toplevel_listener top_listener = {
         .configure = top_configure, .close = top_close};
     xdg_toplevel_add_listener(top, &top_listener, NULL);
+    /* A request before the initial commit must survive initial configure. */
+    xdg_toplevel_set_fullscreen(top, NULL);
     wl_surface_commit(surface);
 
     struct wl_surface *panel = wl_compositor_create_surface(compositor);
@@ -128,10 +137,30 @@ int main(int argc, char **argv) {
     wl_surface_commit(panel);
     while (configured < 2)
         assert(wl_display_roundtrip(display) >= 0);
+    assert(top_fullscreen && top_width > 256 && top_height > 256);
+    int top_before = top_configured;
+    xdg_toplevel_unset_fullscreen(top);
+    while (top_configured == top_before)
+        assert(wl_display_roundtrip(display) >= 0);
+    assert(!top_fullscreen && top_width == 0 && top_height == 0);
     wl_surface_attach(surface, buffer, 0, 0);
     wl_surface_commit(surface);
     wl_surface_attach(panel, buffer, 0, 0);
     wl_surface_commit(panel);
+    assert(wl_display_roundtrip(display) >= 0);
+
+    /* Mapped windows must enter fullscreen and restore their committed size. */
+    top_before = top_configured;
+    xdg_toplevel_set_fullscreen(top, NULL);
+    while (top_configured == top_before)
+        assert(wl_display_roundtrip(display) >= 0);
+    assert(top_fullscreen && top_width > 256 && top_height > 256);
+    top_before = top_configured;
+    xdg_toplevel_unset_fullscreen(top);
+    while (top_configured == top_before)
+        assert(wl_display_roundtrip(display) >= 0);
+    assert(!top_fullscreen && top_width == 256 && top_height == 256);
+    wl_surface_commit(surface);
     assert(wl_display_roundtrip(display) >= 0);
 
     struct wl_surface *popup_surface = wl_compositor_create_surface(compositor);

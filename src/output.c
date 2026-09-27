@@ -193,6 +193,7 @@ static void output_layout_changed(struct wl_listener *listener, void *data) {
     wl_list_for_each(output, &server->outputs, link) {
         layer_shell_arrange(output);
     }
+    canvas_update_view_positions(&server->canvas);
 }
 
 void output_init(struct infinidesk_server *server) {
@@ -789,6 +790,10 @@ static void render_layer_surface_iterator(struct wlr_surface *surface, int sx,
 static void render_layer_surfaces(struct infinidesk_output *output,
                                   struct wlr_render_pass *pass,
                                   enum zwlr_layer_shell_v1_layer layer) {
+    if (layer == ZWLR_LAYER_SHELL_V1_LAYER_TOP &&
+        view_output_has_fullscreen(output))
+        return;
+
     struct infinidesk_layer_surface *layer_surface;
     wl_list_for_each_reverse(layer_surface, &output->layer_surfaces[layer],
                              link) {

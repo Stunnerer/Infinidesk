@@ -477,6 +477,10 @@ layer_surface_at(struct infinidesk_output *output, double ox, double oy,
      */
     for (int layer_idx = LAYER_SHELL_LAYER_COUNT - 1; layer_idx >= 0;
          layer_idx--) {
+        /* Hidden panels and their popups must not intercept pointer input. */
+        if (layer_idx == ZWLR_LAYER_SHELL_V1_LAYER_TOP &&
+            view_output_has_fullscreen(output))
+            continue;
         if (layer_idx == ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
             (server_view_at(output->server, layout_x, layout_y, surface, sx,
                             sy) ||
