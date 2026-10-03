@@ -16,6 +16,7 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_output_layout.h>
@@ -159,6 +160,12 @@ bool server_init(struct infinidesk_server *server) {
         wlr_data_device_manager_create(server->wl_display);
     if (!server->data_device_manager) {
         wlr_log(WLR_ERROR, "Failed to create data device manager");
+        goto error_allocator;
+    }
+
+    /* Allow clipboard managers to monitor selections without keyboard focus. */
+    if (!wlr_data_control_manager_v1_create(server->wl_display)) {
+        wlr_log(WLR_ERROR, "Failed to create data control manager");
         goto error_allocator;
     }
 
