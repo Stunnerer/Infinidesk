@@ -172,6 +172,13 @@ bool server_init(struct infinidesk_server *server);
  */
 bool server_start(struct infinidesk_server *server);
 
+/* Apply runtime settings, taking keybind ownership on success. */
+bool server_apply_config(struct infinidesk_server *server,
+                         struct infinidesk_config *config);
+
+/* Reload runtime settings without executing startup commands. */
+bool server_reload_config(struct infinidesk_server *server);
+
 /*
  * Run the server event loop.
  * This function blocks until the server is terminated.

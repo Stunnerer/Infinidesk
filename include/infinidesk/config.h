@@ -57,6 +57,7 @@ struct infinidesk_config {
 
     bool focus_on_click;
     bool clear_focus_on_background;
+
     /* Keybindings */
     struct keybind *keybinds;
     int keybind_count;
@@ -73,6 +74,13 @@ struct infinidesk_config {
  * false on error.
  */
 bool config_load(struct infinidesk_config *config);
+
+/*
+ * Reload an initialized config without creating a missing file.
+ * Invalid values or read/parse errors leave the current config untouched.
+ * Startup commands are loaded but not executed.
+ */
+bool config_reload(struct infinidesk_config *config);
 
 /*
  * Free resources allocated by config_load.

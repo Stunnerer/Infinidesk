@@ -287,6 +287,10 @@ static void action_reset_zoom(struct infinidesk_server *server) {
                      server->cursor->y);
 }
 
+static void action_reload_config(struct infinidesk_server *server) {
+    server_reload_config(server);
+}
+
 static void action_window_switcher(struct infinidesk_server *server) {
     if (!server->switcher.active) {
         switcher_start(&server->switcher);
@@ -307,6 +311,7 @@ static const struct {
     {"redo_stroke", action_redo_stroke},
     {"gather_windows", action_gather_windows},
     {"reset_zoom", action_reset_zoom},
+    {"reload_config", action_reload_config},
     {"window_switcher", action_window_switcher},
 };
 #define ACTION_TABLE_SIZE (sizeof(action_table) / sizeof(action_table[0]))

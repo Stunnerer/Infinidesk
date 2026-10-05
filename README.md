@@ -101,7 +101,7 @@ Values greater than `1.0` move the canvas faster; values between `0` and
 `1.0` slow it down. Valid values are greater than `0` and at most `20`.
 `wheel_speed` also changes the speed of Super + wheel zoom. Scrolling passed
 to application windows and pinch zoom keep their usual behavior. Changes
-take effect after restarting Infinidesk.
+take effect when you reload the config (see below).
 
 ## Window snapping
 
@@ -117,7 +117,7 @@ window_edges = 12
 ```
 
 Set either value to `0` to disable that type of snapping. Changes take effect
-after restarting Infinidesk.
+when you reload the config (see below).
 
 Keyboard shortcuts in the `[keybinds]` section use US physical key positions.
 For example, `"super + d"` uses the same key with English or Russian input
@@ -135,6 +135,28 @@ The root `scale` setting accepts finite values from `0.5` to `4.0`.
 Invalid scale values keep the default of `1.0`. If loading the file fails,
 built-in shortcuts remain available. New configs use `Super+Return` for the
 terminal; existing configured shortcuts are preserved.
+
+Reload configuration without restarting by pressing `Super+Shift+R`. For an
+existing config with a `[keybinds]` section, add this shortcut to that section:
+
+```toml
+"super + shift + r" = "reload_config"
+```
+
+You can also reload from a terminal, including with an existing config:
+
+```sh
+pkill -HUP -x infinidesk
+```
+
+This sends `SIGHUP` to every running Infinidesk instance; use
+`kill -HUP <pid>` to target one instance. Reload applies keybindings, snapping,
+scroll speeds, and output scale to existing and future outputs, retaining
+nested Wayland host scaling. Startup commands only run at compositor startup.
+Missing files, read errors, invalid setting values, or malformed keybindings
+leave the current configuration in place; reload results are logged to stderr.
+A `[keybinds]` section replaces the defaults, so keep a `reload_config` binding
+if you want to continue reloading by keyboard.
 
 Shortcuts match their specified modifiers exactly, ignoring Caps Lock and
 Num Lock. `Alt+Shift+Tab` cycles backwards when `Alt+Tab` is configured as

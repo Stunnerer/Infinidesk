@@ -80,6 +80,9 @@ void output_get_box(struct infinidesk_output *output, struct wlr_box *box);
 
 void output_schedule_frames(struct infinidesk_server *server);
 
+/* Apply config scale to all outputs, retaining nested host scaling. */
+bool output_set_config_scale(struct infinidesk_server *server, float scale);
+
 void output_init(struct infinidesk_server *server);
 
 /*

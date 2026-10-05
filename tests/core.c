@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <wlr/backend/headless.h>
@@ -71,6 +72,88 @@ static const struct wlr_pointer_grab_interface test_drag_interface = {
     .clear_focus = drag_clear_focus,
     .motion = drag_motion,
 };
+
+static void test_config_reload(struct infinidesk_server *server,
+                               struct wlr_keyboard *keyboard) {
+    char directory[] = "/tmp/infinidesk-reload-test-XXXXXX";
+    assert(mkdtemp(directory));
+    const char *old_config_home = getenv("XDG_CONFIG_HOME");
+    char *saved_config_home = old_config_home ? strdup(old_config_home) : NULL;
+    assert(!old_config_home || saved_config_home);
+    assert(setenv("XDG_CONFIG_HOME", directory, 1) == 0);
+    struct infinidesk_config config;
+    assert(config_load(&config));
+    assert(server_apply_config(server, &config));
+    config_free(&config);
+
+    char path[512], marker[512];
+    snprintf(path, sizeof(path), "%s/infinidesk/infinidesk.toml", directory);
+    snprintf(marker, sizeof(marker), "%s/startup-ran", directory);
+    FILE *file = fopen(path, "w");
+    assert(file);
+    assert(fprintf(file, "scale = 2\nstartup = [\"touch %s\"]\n"
+                         "[snapping]\nscreen_edges = 0\nwindow_edges = 25\n"
+                         "[scroll]\nwheel_speed = 3\ngesture_speed = 4\n"
+                         "[keybinds]\n\"super + c\" = \"clear_drawings\"\n",
+                   marker) > 0);
+    assert(fclose(file) == 0);
+
+    uint32_t modifiers =
+        (1u << xkb_keymap_mod_get_index(keyboard->keymap, XKB_MOD_NAME_LOGO)) |
+        (1u << xkb_keymap_mod_get_index(keyboard->keymap, XKB_MOD_NAME_SHIFT));
+    wlr_keyboard_notify_modifiers(keyboard, modifiers, 0, 0, 1);
+    struct wlr_keyboard_key_event event = {
+        .keycode = KEY_R,
+        .state = WL_KEYBOARD_KEY_STATE_PRESSED,
+        .update_state = false,
+    };
+    /* Reload replaces (and frees) the very binding currently being dispatched. */
+    wlr_keyboard_notify_key(keyboard, &event);
+    struct infinidesk_keyboard *wrapper =
+        wl_container_of(server->keyboards.next, wrapper, link);
+    assert(wrapper->consumed_keys[KEY_R]);
+    event.state = WL_KEYBOARD_KEY_STATE_RELEASED;
+    wlr_keyboard_notify_key(keyboard, &event);
+    assert(!wrapper->consumed_keys[KEY_R]);
+    assert(server->output_scale == 2.0f && server->keybind_count == 1);
+    assert(server->snap_screen_px == 0 && server->snap_window_px == 25);
+    assert(server->wheel_speed == 3 && server->gesture_speed == 4);
+    assert(strcmp(server->keybinds[0].value, "clear_drawings") == 0);
+    assert(access(marker, F_OK) != 0);
+    struct infinidesk_output *output;
+    wl_list_for_each(output, &server->outputs, link) {
+        assert(output->wlr_output->scale == 2.0f);
+        assert(output->usable_area.width == output->wlr_output->width / 2);
+    }
+
+    struct keybind *active_keybinds = server->keybinds;
+    file = fopen(path, "w");
+    assert(file && fputs("scale = 3\nstartup = [42]\n", file) >= 0);
+    assert(fclose(file) == 0);
+    assert(!server_reload_config(server));
+    assert(server->keybinds == active_keybinds && server->output_scale == 2.0f);
+    assert(server->wheel_speed == 3 && server->snap_window_px == 25);
+    wl_list_for_each(output, &server->outputs, link)
+        assert(output->wlr_output->scale == 2.0f);
+
+    file = fopen(path, "w");
+    assert(file && fputs("scale = 1\n", file) >= 0);
+    assert(fclose(file) == 0);
+    assert(server_reload_config(server));
+    assert(server->keybind_count == 11 && server->wheel_speed == 1);
+    wl_list_for_each(output, &server->outputs, link)
+        assert(output->wlr_output->scale == 1.0f);
+
+    assert(unlink(path) == 0);
+    snprintf(path, sizeof(path), "%s/infinidesk", directory);
+    assert(rmdir(path) == 0 && rmdir(directory) == 0);
+    if (saved_config_home) {
+        assert(setenv("XDG_CONFIG_HOME", saved_config_home, 1) == 0);
+        free(saved_config_home);
+    } else {
+        assert(unsetenv("XDG_CONFIG_HOME") == 0);
+    }
+}
 
 int main(int argc, char **argv) {
     assert(argc == 2);
@@ -230,6 +313,7 @@ int main(int argc, char **argv) {
     assert(keyboard_handle_keybinding(
         &server, WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT, XKB_KEY_F1));
 
+    test_config_reload(&server, &keyboard);
     wlr_keyboard_finish(&keyboard);
     assert(wl_list_empty(&server.keyboards) && !server.super_pressed);
 

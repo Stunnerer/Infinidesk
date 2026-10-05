@@ -40,6 +40,7 @@ static void print_usage(const char *prog_name) {
             "  Super + D          Toggle drawing mode\n"
             "  Super + 0          Reset zoom to 100%%\n"
             "  Super + G          Gather windows\n"
+            "  Super + Shift + R  Reload configuration (also via SIGHUP)\n"
             "  Alt + Tab          Window switcher\n"
             "  Super + Left-drag  Move window\n"
             "  Super + Right-drag Pan canvas\n"
@@ -51,6 +52,12 @@ static void print_usage(const char *prog_name) {
 static int handle_signal(int sig, void *data) {
     (void)sig;
     wl_display_terminate(data);
+    return 0;
+}
+
+static int handle_reload_signal(int sig, void *data) {
+    (void)sig;
+    server_reload_config(data);
     return 0;
 }
 
@@ -101,11 +108,15 @@ int main(int argc, char *argv[]) {
         server.event_loop, SIGINT, handle_signal, server.wl_display);
     struct wl_event_source *sigterm_source = wl_event_loop_add_signal(
         server.event_loop, SIGTERM, handle_signal, server.wl_display);
-    if (!sigint_source || !sigterm_source) {
+    struct wl_event_source *sighup_source = wl_event_loop_add_signal(
+        server.event_loop, SIGHUP, handle_reload_signal, &server);
+    if (!sigint_source || !sigterm_source || !sighup_source) {
         if (sigint_source)
             wl_event_source_remove(sigint_source);
         if (sigterm_source)
             wl_event_source_remove(sigterm_source);
+        if (sighup_source)
+            wl_event_source_remove(sighup_source);
         server_finish(&server);
         return EXIT_FAILURE;
     }
@@ -115,23 +126,7 @@ int main(int argc, char *argv[]) {
     if (!config_load(&config)) {
         wlr_log(WLR_ERROR, "Failed to load config, continuing with defaults");
     }
-    server.output_scale = config.scale;
-    server.snap_screen_px = config.snap_screen_px;
-    server.snap_window_px = config.snap_window_px;
-    server.wheel_speed = config.wheel_speed;
-    server.gesture_speed = config.gesture_speed;
-    server.focus_on_click = config.focus_on_click;
-    server.clear_focus_on_background = config.clear_focus_on_background;
-
-    /*
-     * Transfer keybind ownership from config to server.
-     * We steal the pointer so config_free() won't free it while
-     * the server is still running.
-     */
-    server.keybinds = config.keybinds;
-    server.keybind_count = config.keybind_count;
-    config.keybinds = NULL;
-    config.keybind_count = 0;
+    server_apply_config(&server, &config);
 
     /* Start the backend */
     if (!server_start(&server)) {
@@ -139,6 +134,7 @@ int main(int argc, char *argv[]) {
         config_free(&config);
         wl_event_source_remove(sigint_source);
         wl_event_source_remove(sigterm_source);
+        wl_event_source_remove(sighup_source);
         server_finish(&server);
         return EXIT_FAILURE;
     }
@@ -160,6 +156,7 @@ int main(int argc, char *argv[]) {
     config_free(&config);
     wl_event_source_remove(sigint_source);
     wl_event_source_remove(sigterm_source);
+    wl_event_source_remove(sighup_source);
     server_finish(&server);
 
     return EXIT_SUCCESS;

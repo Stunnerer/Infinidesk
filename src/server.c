@@ -294,6 +294,44 @@ error_display:
     return false;
 }
 
+bool server_apply_config(struct infinidesk_server *server,
+                         struct infinidesk_config *config) {
+    if (config->scale != server->output_scale &&
+        !output_set_config_scale(server, config->scale)) {
+        return false;
+    }
+
+    struct infinidesk_config previous = {
+        .keybinds = server->keybinds,
+        .keybind_count = server->keybind_count,
+    };
+    server->output_scale = config->scale;
+    server->snap_screen_px = config->snap_screen_px;
+    server->snap_window_px = config->snap_window_px;
+    server->wheel_speed = config->wheel_speed;
+    server->gesture_speed = config->gesture_speed;
+    server->focus_on_click = config->focus_on_click;
+    server->clear_focus_on_background = config->clear_focus_on_background;
+    server->keybinds = config->keybinds;
+    server->keybind_count = config->keybind_count;
+    config->keybinds = NULL;
+    config->keybind_count = 0;
+    config_free(&previous);
+    return true;
+}
+
+bool server_reload_config(struct infinidesk_server *server) {
+    struct infinidesk_config config = {0};
+    bool success = config_reload(&config) && server_apply_config(server, &config);
+    config_free(&config);
+    if (success) {
+        wlr_log(WLR_INFO, "Configuration reloaded");
+    } else {
+        wlr_log(WLR_ERROR, "Config reload failed; keeping current configuration");
+    }
+    return success;
+}
+
 bool server_start(struct infinidesk_server *server) {
     /* Add a Unix socket to the Wayland display */
     const char *socket = wl_display_add_socket_auto(server->wl_display);
@@ -329,7 +367,7 @@ void server_finish(struct infinidesk_server *server) {
     /* Clean up switcher */
     switcher_finish(&server->switcher);
 
-    /* Free keybindings (ownership transferred from config in main.c) */
+    /* Free keybindings owned by the server. */
     if (server->keybinds) {
         for (int i = 0; i < server->keybind_count; i++) {
             free(server->keybinds[i].value);

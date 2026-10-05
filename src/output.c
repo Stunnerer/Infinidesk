@@ -19,6 +19,7 @@
 #include <drm_fourcc.h>
 #include <pango/pangocairo.h>
 #include <wayland-client.h>
+#include <wlr/backend.h>
 #include <wlr/backend/wayland.h>
 #include <wlr/render/pass.h>
 #include <wlr/render/wlr_renderer.h>
@@ -173,6 +174,58 @@ void output_schedule_frames(struct infinidesk_server *server) {
     wl_list_for_each(output, &server->outputs, link) {
         wlr_output_schedule_frame(output->wlr_output);
     }
+}
+
+bool output_set_config_scale(struct infinidesk_server *server, float scale) {
+    size_t count = wl_list_length(&server->outputs);
+    if (count == 0)
+        return true;
+
+    struct wlr_backend_output_state *states = calloc(count, sizeof(*states));
+    float *previous = calloc(count, sizeof(*previous));
+    if (!states || !previous) {
+        free(states);
+        free(previous);
+        return false;
+    }
+
+    size_t index = 0;
+    struct infinidesk_output *output;
+    wl_list_for_each(output, &server->outputs, link) {
+        states[index].output = output->wlr_output;
+        previous[index] = output->wlr_output->scale;
+        wlr_output_state_init(&states[index].base);
+        float host_scale =
+            output->nested_viewport ? output->nested_host_scale : 1.0f;
+        wlr_output_state_set_scale(&states[index].base, scale * host_scale);
+        index++;
+    }
+
+    bool success = wlr_backend_test(server->backend, states, count);
+    if (success && !wlr_backend_commit(server->backend, states, count)) {
+        /* A backend may have applied only some outputs before failing. */
+        for (size_t i = 0; i < count; i++)
+            wlr_output_state_set_scale(&states[i].base, previous[i]);
+        if (!wlr_backend_commit(server->backend, states, count))
+            wlr_log(WLR_ERROR, "Failed to restore output scales after reload");
+        success = false;
+    }
+    for (size_t i = 0; i < count; i++)
+        wlr_output_state_finish(&states[i].base);
+    free(states);
+    free(previous);
+
+    if (success) {
+        wl_list_for_each(output, &server->outputs, link) {
+            wlr_xcursor_manager_load(server->xcursor_manager,
+                                     output->wlr_output->scale);
+        }
+        canvas_update_view_positions(&server->canvas);
+        output_schedule_frames(server);
+    } else {
+        wlr_log(WLR_ERROR, "Failed to apply configured output scale");
+    }
+    return success;
 }
 
 static void output_handle_commit(struct wl_listener *listener, void *data) {

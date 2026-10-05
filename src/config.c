@@ -65,6 +65,7 @@ static const char *DEFAULT_CONFIG =
     "\"super + c\" = \"clear_drawings\"\n"
     "\"super + u\" = \"undo_stroke\"\n"
     "\"super + r\" = \"redo_stroke\"\n"
+    "\"super + shift + r\" = \"reload_config\"\n"
     "\"super + g\" = \"gather_windows\"\n"
     "\"super + 0\" = \"reset_zoom\"\n"
     "\"alt + tab\" = \"window_switcher\"\n";
@@ -501,9 +502,10 @@ static bool config_add_keybind(struct infinidesk_config *config, int *capacity,
 /*
  * Parse the [keybinds] section from the config file.
  * Returns true if keybinds were found and parsed, false if the section
- * was not present or an error occurred.
+ * was not present. Sets valid to false on parse or allocation errors.
  */
-static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
+static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config,
+                                   bool *valid) {
     char line[MAX_LINE_LENGTH];
     bool in_section = false;
     int capacity = INITIAL_KEYBINDS_CAPACITY;
@@ -515,6 +517,7 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
     config->keybind_count = 0;
     config->keybinds = malloc(capacity * sizeof(struct keybind));
     if (!config->keybinds) {
+        *valid = false;
         return false;
     }
     config->keybind_count = 0;
@@ -531,7 +534,12 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
 
         /* Check for section headers */
         if (*p == '[') {
-            if (strncmp(p, "[keybinds]", 10) == 0) {
+            char *comment = strchr(p, '#');
+            if (comment) {
+                *comment = '\0';
+                trim_trailing(p);
+            }
+            if (strcmp(p, "[keybinds]") == 0) {
                 in_section = true;
             } else {
                 /* A different section - stop parsing keybinds */
@@ -551,18 +559,21 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
          * Both the key string and value are quoted.
          */
         if (*p != '"') {
+            *valid = false;
             continue;
         }
 
         char *cursor = p;
         char *key_str = parse_quoted_string(&cursor);
         if (!key_str) {
+            *valid = false;
             continue;
         }
 
         cursor = skip_whitespace(cursor);
         if (*cursor != '=') {
             wlr_log(WLR_ERROR, "Config: expected '=' after keybind key");
+            *valid = false;
             free(key_str);
             continue;
         }
@@ -571,7 +582,16 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
         char *val_str = parse_quoted_string(&cursor);
         if (!val_str) {
             wlr_log(WLR_ERROR, "Config: expected quoted value for keybind");
+            *valid = false;
             free(key_str);
+            continue;
+        }
+
+        cursor = skip_whitespace(cursor);
+        if (*cursor != '\0' && *cursor != '#') {
+            *valid = false;
+            free(key_str);
+            free(val_str);
             continue;
         }
 
@@ -580,6 +600,7 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
         uint32_t key;
         if (!parse_keybind_key_string(key_str, &modifiers, &key)) {
             wlr_log(WLR_ERROR, "Config: failed to parse keybind '%s'", key_str);
+            *valid = false;
             free(key_str);
             free(val_str);
             continue;
@@ -600,6 +621,7 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
                                 value)) {
             free(key_str);
             free(val_str);
+            *valid = false;
             return false;
         }
 
@@ -608,6 +630,8 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
         free(val_str);
     }
 
+    if (ferror(f))
+        *valid = false;
     return in_section;
 }
 
@@ -615,7 +639,7 @@ static bool parse_keybinds_section(FILE *f, struct infinidesk_config *config) {
  * Populate default keybinds when no [keybinds] section is present.
  * This ensures the compositor always has a working set of bindings.
  */
-static void config_set_default_keybinds(struct infinidesk_config *config) {
+static bool config_set_default_keybinds(struct infinidesk_config *config) {
     for (int i = 0; i < config->keybind_count; i++) {
         free(config->keybinds[i].value);
     }
@@ -630,6 +654,7 @@ static void config_set_default_keybinds(struct infinidesk_config *config) {
         {"super + Escape", "exit"},       {"super + d", "toggle_drawing"},
         {"super + c", "clear_drawings"},  {"super + u", "undo_stroke"},
         {"super + r", "redo_stroke"},     {"super + g", "gather_windows"},
+        {"super + shift + r", "reload_config"},
         {"super + 0", "reset_zoom"},      {"alt + Tab", "window_switcher"},
     };
     int count = sizeof(defaults) / sizeof(defaults[0]);
@@ -637,7 +662,7 @@ static void config_set_default_keybinds(struct infinidesk_config *config) {
 
     config->keybinds = malloc(capacity * sizeof(struct keybind));
     if (!config->keybinds) {
-        return;
+        return false;
     }
     config->keybind_count = 0;
 
@@ -645,7 +670,7 @@ static void config_set_default_keybinds(struct infinidesk_config *config) {
         uint32_t modifiers;
         uint32_t key;
         if (!parse_keybind_key_string(defaults[i].key_str, &modifiers, &key)) {
-            continue;
+            return false;
         }
 
         enum keybind_type type;
@@ -658,16 +683,19 @@ static void config_set_default_keybinds(struct infinidesk_config *config) {
             value = defaults[i].value;
         }
 
-        config_add_keybind(config, &capacity, modifiers, key, type, value);
+        if (!config_add_keybind(config, &capacity, modifiers, key, type, value))
+            return false;
     }
 
     wlr_log(WLR_INFO, "Using %d default keybind(s)", config->keybind_count);
+    return true;
 }
 
 /*
  * Parse a float value from the config line.
  */
-static bool parse_float_value(const char *line, const char *key, float *value) {
+static bool parse_float_value(const char *line, const char *key, float *value,
+                              bool *valid) {
     char *p = (char *)line;
     size_t key_len = strlen(key);
 
@@ -675,9 +703,14 @@ static bool parse_float_value(const char *line, const char *key, float *value) {
         return false;
     }
 
+    if (p[key_len] && p[key_len] != '=' &&
+        !isspace((unsigned char)p[key_len]))
+        return false;
     p = skip_whitespace(p + key_len);
     if (*p != '=') {
-        return false;
+        wlr_log(WLR_ERROR, "Config: expected '=' after %s", key);
+        *valid = false;
+        return true;
     }
 
     p = skip_whitespace(p + 1);
@@ -689,22 +722,29 @@ static bool parse_float_value(const char *line, const char *key, float *value) {
     if (!has_digits || errno != 0 || !isfinite(v) || v < 0.5f || v > 4.0f ||
         (*end != '\0' && *end != '#')) {
         wlr_log(WLR_ERROR, "Config: invalid %s (expected 0.5..4)", key);
-        return false;
+        *valid = false;
+        return true;
     }
 
     *value = v;
     return true;
 }
 
-static bool parse_snap_distance(const char *line, const char *key, int *value) {
+static bool parse_snap_distance(const char *line, const char *key, int *value,
+                                bool *valid) {
     size_t key_len = strlen(key);
     if (strncmp(line, key, key_len) != 0) {
         return false;
     }
 
+    if (line[key_len] && line[key_len] != '=' &&
+        !isspace((unsigned char)line[key_len]))
+        return false;
     char *p = skip_whitespace((char *)line + key_len);
     if (*p != '=') {
-        return false;
+        wlr_log(WLR_ERROR, "Config: expected '=' after %s", key);
+        *valid = false;
+        return true;
     }
     p = skip_whitespace(p + 1);
     char *end;
@@ -715,6 +755,7 @@ static bool parse_snap_distance(const char *line, const char *key, int *value) {
     if (!has_digits || errno != 0 || distance < 0 || distance > 1000 ||
         (*end != '\0' && *end != '#')) {
         wlr_log(WLR_ERROR, "Config: invalid %s (expected 0..1000)", key);
+        *valid = false;
         return true;
     }
     *value = (int)distance;
@@ -722,15 +763,20 @@ static bool parse_snap_distance(const char *line, const char *key, int *value) {
 }
 
 static bool parse_scroll_speed(const char *line, const char *key,
-                               double *value) {
+                               double *value, bool *valid) {
     size_t key_len = strlen(key);
     if (strncmp(line, key, key_len) != 0) {
         return false;
     }
 
+    if (line[key_len] && line[key_len] != '=' &&
+        !isspace((unsigned char)line[key_len]))
+        return false;
     char *p = skip_whitespace((char *)line + key_len);
     if (*p != '=') {
-        return false;
+        wlr_log(WLR_ERROR, "Config: expected '=' after %s", key);
+        *valid = false;
+        return true;
     }
     p = skip_whitespace(p + 1);
     char *end;
@@ -742,13 +788,15 @@ static bool parse_scroll_speed(const char *line, const char *key,
         speed > 20.0 || (*end != '\0' && *end != '#')) {
         wlr_log(WLR_ERROR, "Config: invalid %s (expected > 0 and <= 20)",
                 key);
+        *valid = false;
         return true;
     }
     *value = speed;
     return true;
 }
 
-static bool parse_focus_bool(const char *line, const char *key, bool *value) {
+static bool parse_focus_bool(const char *line, const char *key, bool *value,
+                             bool *valid) {
     size_t key_len = strlen(key);
     if (strncmp(line, key, key_len) != 0 ||
         (line[key_len] && line[key_len] != '=' &&
@@ -756,6 +804,7 @@ static bool parse_focus_bool(const char *line, const char *key, bool *value) {
         return false;
     char *p = skip_whitespace((char *)line + key_len);
     if (*p != '=') {
+        *valid = false;
         return true;
     }
     p = skip_whitespace(p + 1);
@@ -769,11 +818,12 @@ static bool parse_focus_bool(const char *line, const char *key, bool *value) {
         *value = false;
     } else {
         wlr_log(WLR_ERROR, "Config: invalid %s (expected true or false)", key);
+        *valid = false;
     }
     return true;
 }
 
-bool config_load(struct infinidesk_config *config) {
+static bool config_read(struct infinidesk_config *config, bool reload) {
     memset(config, 0, sizeof(*config));
 
     /* Set defaults */
@@ -785,7 +835,8 @@ bool config_load(struct infinidesk_config *config) {
     config->focus_on_click = true;
     config->clear_focus_on_background = true;
 
-    config_set_default_keybinds(config);
+    if (!config_set_default_keybinds(config))
+        return false;
 
     char *path = get_config_path();
     if (!path) {
@@ -793,7 +844,7 @@ bool config_load(struct infinidesk_config *config) {
     }
 
     /* Create config file if it doesn't exist */
-    if (!ensure_config_file(path)) {
+    if (!reload && !ensure_config_file(path)) {
         free(path);
         return false;
     }
@@ -812,6 +863,7 @@ bool config_load(struct infinidesk_config *config) {
 
     /* First pass: parse simple key-value pairs */
     char line[MAX_LINE_LENGTH];
+    bool valid = true;
     bool in_snapping = false;
     bool in_scroll = false;
     bool in_focus = false;
@@ -840,40 +892,41 @@ bool config_load(struct infinidesk_config *config) {
         }
 
         if (in_focus &&
-            (parse_focus_bool(p, "on_click", &config->focus_on_click) ||
+            (parse_focus_bool(p, "on_click", &config->focus_on_click,
+                              &valid) ||
              parse_focus_bool(p, "clear_on_background",
-                              &config->clear_focus_on_background)))
+                              &config->clear_focus_on_background, &valid)))
             continue;
 
         if (in_scroll) {
             if (parse_scroll_speed(p, "wheel_speed",
-                                   &config->wheel_speed) ||
+                                   &config->wheel_speed, &valid) ||
                 parse_scroll_speed(p, "gesture_speed",
-                                   &config->gesture_speed)) {
+                                   &config->gesture_speed, &valid)) {
                 continue;
             }
         }
 
         if (in_snapping) {
             if (parse_snap_distance(p, "screen_edges",
-                                    &config->snap_screen_px) ||
+                                    &config->snap_screen_px, &valid) ||
                 parse_snap_distance(p, "window_edges",
-                                    &config->snap_window_px)) {
+                                    &config->snap_window_px, &valid)) {
                 continue;
             }
         }
 
         /* Parse scale */
-        float scale_value;
-        if (!in_section && parse_float_value(p, "scale", &scale_value)) {
-            config->scale = scale_value;
+        if (!in_section &&
+            parse_float_value(p, "scale", &config->scale, &valid)) {
             wlr_log(WLR_INFO, "Config: scale = %.2f", config->scale);
         }
     }
 
     /* Rewind and parse startup array */
+    bool success = !ferror(f);
     rewind(f);
-    bool success = parse_startup_array(f, config);
+    success = parse_startup_array(f, config) && success;
 
     if (!success) {
         fclose(f);
@@ -884,15 +937,34 @@ bool config_load(struct infinidesk_config *config) {
 
     /* Rewind and parse keybinds section */
     rewind(f);
-    bool has_keybinds = parse_keybinds_section(f, config);
-    fclose(f);
-
-    if (!has_keybinds) {
+    bool keybinds_valid = true;
+    bool has_keybinds = parse_keybinds_section(f, config, &keybinds_valid);
+    if (fclose(f) != 0 || !keybinds_valid || (reload && !valid)) {
+        config_free(config);
         config_set_default_keybinds(config);
+        return false;
     }
+
+    if (!has_keybinds && !config_set_default_keybinds(config))
+        return false;
 
     wlr_log(WLR_INFO, "Loaded %d startup command(s), %d keybind(s) from config",
             config->startup_command_count, config->keybind_count);
+    return true;
+}
+
+bool config_load(struct infinidesk_config *config) {
+    return config_read(config, false);
+}
+
+bool config_reload(struct infinidesk_config *config) {
+    struct infinidesk_config replacement;
+    if (!config_read(&replacement, true)) {
+        config_free(&replacement);
+        return false;
+    }
+    config_free(config);
+    *config = replacement;
     return true;
 }
 
