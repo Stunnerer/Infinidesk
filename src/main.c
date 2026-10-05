@@ -120,6 +120,8 @@ int main(int argc, char *argv[]) {
     server.snap_window_px = config.snap_window_px;
     server.wheel_speed = config.wheel_speed;
     server.gesture_speed = config.gesture_speed;
+    server.focus_on_click = config.focus_on_click;
+    server.clear_focus_on_background = config.clear_focus_on_background;
 
     /*
      * Transfer keybind ownership from config to server.

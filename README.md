@@ -67,6 +67,25 @@ to use the `scale` value from the Infinidesk config.
 The bottom-left corner of the background shows the canvas coordinates at the
 centre of the viewport and the current zoom percentage.
 
+## Window focus
+
+By default, clicking inside a window focuses it and passes the click to the
+application. Clicking empty canvas, panning with Super + right drag or middle
+drag, using Super + scroll, scrolling the empty canvas, and pinching clear
+keyboard focus from all windows. Configure these behaviors independently in
+`~/.config/infinidesk/infinidesk.toml`:
+
+```toml
+[focus]
+on_click = true
+clear_on_background = true
+```
+
+Set `on_click = false` to focus windows on pointer hover. Set
+`clear_on_background = false` to keep window focus during canvas actions.
+Existing configs use the values shown above when these keys are absent.
+Changes take effect after a config reload.
+
 ## Canvas scroll speed
 
 Add separate speed multipliers for mouse wheel scrolling and two-finger

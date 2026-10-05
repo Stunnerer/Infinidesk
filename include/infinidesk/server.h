@@ -152,6 +152,8 @@ struct infinidesk_server {
     int snap_window_px;
     double wheel_speed;
     double gesture_speed;
+    bool focus_on_click;
+    bool clear_focus_on_background;
 
     /* Configurable keybindings (owned by the server, freed on shutdown) */
     struct keybind *keybinds;

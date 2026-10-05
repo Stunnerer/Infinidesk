@@ -213,6 +213,28 @@ void view_focus(struct infinidesk_view *view) {
     wlr_log(WLR_DEBUG, "Focused view %p", (void *)view);
 }
 
+void view_clear_focus(struct infinidesk_server *server) {
+    uint32_t now = get_time_ms();
+    bool changed = false;
+    struct infinidesk_view *view;
+    wl_list_for_each(view, &server->views, link) {
+        if (!view->focused)
+            continue;
+        view->focused = false;
+        changed = true;
+        view->focus_anim_start_ms = now;
+        view->focus_anim_active = true;
+        wlr_xdg_toplevel_set_activated(view->xdg_toplevel, false);
+    }
+    if (!server->focused_layer &&
+        server->seat->keyboard_state.focused_surface) {
+        wlr_seat_keyboard_clear_focus(server->seat);
+        changed = true;
+    }
+    if (changed)
+        output_schedule_frames(server);
+}
+
 void view_raise(struct infinidesk_view *view) {
     if (!view) {
         return;

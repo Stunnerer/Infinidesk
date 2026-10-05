@@ -51,6 +51,8 @@ static int scroll_pan_timer_callback(void *data) {
 
 static void cursor_scroll_pan(struct infinidesk_server *server,
                               const struct wlr_pointer_axis_event *event) {
+    if (server->clear_focus_on_background)
+        view_clear_focus(server);
     double speed = event->source == WL_POINTER_AXIS_SOURCE_FINGER
                        ? server->gesture_speed
                        : server->wheel_speed;
@@ -259,6 +261,8 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
 
     /* The drawing overlay is above every client surface. */
     if (server->drawing.drawing_mode && event->button == BTN_LEFT) {
+        if (server->clear_focus_on_background)
+            view_clear_focus(server);
         enum drawing_ui_button button = drawing_ui_get_button_at(
             &server->drawing.ui_panel, server->cursor->x, server->cursor->y);
         if (button != UI_BUTTON_NONE) {
@@ -278,6 +282,8 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
 
     if ((server->super_pressed && event->button == BTN_RIGHT) ||
         (event->button == BTN_MIDDLE && !cursor_over_content(server))) {
+        if (server->clear_focus_on_background)
+            view_clear_focus(server);
         server->cursor_mode = INFINIDESK_CURSOR_PAN;
         server->grab_button = server->pan_button = event->button;
         canvas_pan_begin(&server->canvas, server->cursor->x, server->cursor->y);
@@ -340,6 +346,10 @@ void cursor_handle_button(struct wl_listener *listener, void *data) {
     if (view) {
         view_focus(view);
         view_raise(view);
+    } else if (event->button == BTN_LEFT &&
+               server->clear_focus_on_background &&
+               edges == WLR_EDGE_NONE && !surface) {
+        view_clear_focus(server);
     }
 
 done:
@@ -371,6 +381,8 @@ void cursor_handle_axis(struct wl_listener *listener, void *data) {
 
     /* Super + mouse wheel zooms the canvas. */
     if (server->super_pressed) {
+        if (server->clear_focus_on_background)
+            view_clear_focus(server);
         if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL &&
             event->delta != 0) {
             double zoom_step = pow(ZOOM_SCROLL_FACTOR, server->wheel_speed);
@@ -447,6 +459,8 @@ void cursor_handle_pinch_begin(struct wl_listener *listener, void *data) {
     server->pinch_active = true;
     server->pinch_pointer = event->pointer;
     server->pinch_start_scale = server->canvas.scale;
+    if (server->clear_focus_on_background)
+        view_clear_focus(server);
     server->scroll_panning = false;
     if (server->scroll_pan_timer) {
         wl_event_source_timer_update(server->scroll_pan_timer, 0);
@@ -607,8 +621,8 @@ void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
     }
 
     /*
-     * Passthrough mode: update pointer focus, cursor image, and keyboard focus.
-     * Implements focus-follows-mouse behaviour.
+     * Passthrough mode: update pointer focus and cursor image. Keyboard focus
+     * follows the pointer only when click-to-focus is disabled.
      *
      * Layer surfaces (overlays, panels, launchers) take priority over views
      * for pointer input, as they are rendered above views in the z-order.
@@ -671,7 +685,8 @@ void cursor_process_motion(struct infinidesk_server *server, uint32_t time) {
          * while the user is navigating the canvas.
          * Also skip if an exclusive layer surface holds keyboard focus.
          */
-        if (view && !server->scroll_panning && !server->focused_layer &&
+        if (view && !server->focus_on_click && !server->scroll_panning &&
+            !server->focused_layer &&
             !server->switcher.active && !server->canvas.snap_anim_active) {
             view_focus(view);
         }

@@ -99,6 +99,8 @@ bool server_init(struct infinidesk_server *server) {
     server->snap_window_px = 12;
     server->wheel_speed = 1.0;
     server->gesture_speed = 1.0;
+    server->focus_on_click = true;
+    server->clear_focus_on_background = true;
 
     /* Create the Wayland display */
     server->wl_display = wl_display_create();

@@ -28,6 +28,7 @@ int main(void) {
     struct infinidesk_config config;
     assert(config_load(&config));
     assert(config.keybind_count == 10);
+    assert(config.focus_on_click && config.clear_focus_on_background);
     config_free(&config);
 
     const char *invalid[] = {"nan", "inf", "0", "-1", "1e30", "1.5junk"};
@@ -50,6 +51,12 @@ int main(void) {
     assert(config.startup_command_count == 2);
     assert(strcmp(config.startup_commands[1], "two") == 0);
     assert(config.keybind_count == 1);
+    config_free(&config);
+
+    write_config("[focus]\non_click = false # hover focus\n"
+                 "clear_on_background = false\n");
+    assert(config_load(&config));
+    assert(!config.focus_on_click && !config.clear_focus_on_background);
     config_free(&config);
 
     const char *malformed[] = {

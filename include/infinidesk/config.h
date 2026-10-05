@@ -55,6 +55,8 @@ struct infinidesk_config {
     double wheel_speed;
     double gesture_speed;
 
+    bool focus_on_click;
+    bool clear_focus_on_background;
     /* Keybindings */
     struct keybind *keybinds;
     int keybind_count;

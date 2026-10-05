@@ -52,6 +52,11 @@ static const char *DEFAULT_CONFIG =
     "wheel_speed = 1.0\n"
     "gesture_speed = 1.0\n"
     "\n"
+    "[focus]\n"
+    "# Focus windows on click and clear focus when interacting with the canvas.\n"
+    "on_click = true\n"
+    "clear_on_background = true\n"
+    "\n"
     "[keybinds]\n"
     "\"super + Return\" = \"exec:kitty\"\n"
     "\"super + q\" = \"close_window\"\n"
@@ -743,6 +748,31 @@ static bool parse_scroll_speed(const char *line, const char *key,
     return true;
 }
 
+static bool parse_focus_bool(const char *line, const char *key, bool *value) {
+    size_t key_len = strlen(key);
+    if (strncmp(line, key, key_len) != 0 ||
+        (line[key_len] && line[key_len] != '=' &&
+         !isspace((unsigned char)line[key_len])))
+        return false;
+    char *p = skip_whitespace((char *)line + key_len);
+    if (*p != '=') {
+        return true;
+    }
+    p = skip_whitespace(p + 1);
+    if (strncmp(p, "true", 4) == 0 &&
+        (*skip_whitespace(p + 4) == '\0' ||
+         *skip_whitespace(p + 4) == '#')) {
+        *value = true;
+    } else if (strncmp(p, "false", 5) == 0 &&
+               (*skip_whitespace(p + 5) == '\0' ||
+                *skip_whitespace(p + 5) == '#')) {
+        *value = false;
+    } else {
+        wlr_log(WLR_ERROR, "Config: invalid %s (expected true or false)", key);
+    }
+    return true;
+}
+
 bool config_load(struct infinidesk_config *config) {
     memset(config, 0, sizeof(*config));
 
@@ -752,6 +782,8 @@ bool config_load(struct infinidesk_config *config) {
     config->snap_window_px = 12;
     config->wheel_speed = 1.0;
     config->gesture_speed = 1.0;
+    config->focus_on_click = true;
+    config->clear_focus_on_background = true;
 
     config_set_default_keybinds(config);
 
@@ -782,6 +814,7 @@ bool config_load(struct infinidesk_config *config) {
     char line[MAX_LINE_LENGTH];
     bool in_snapping = false;
     bool in_scroll = false;
+    bool in_focus = false;
     bool in_section = false;
     while (fgets(line, sizeof(line), f)) {
         char *p = skip_whitespace(line);
@@ -802,8 +835,15 @@ bool config_load(struct infinidesk_config *config) {
             in_section = true;
             in_snapping = strcmp(p, "[snapping]") == 0;
             in_scroll = strcmp(p, "[scroll]") == 0;
+            in_focus = strcmp(p, "[focus]") == 0;
             continue;
         }
+
+        if (in_focus &&
+            (parse_focus_bool(p, "on_click", &config->focus_on_click) ||
+             parse_focus_bool(p, "clear_on_background",
+                              &config->clear_focus_on_background)))
+            continue;
 
         if (in_scroll) {
             if (parse_scroll_speed(p, "wheel_speed",

@@ -125,6 +125,9 @@ void view_destroy(struct infinidesk_view *view);
  */
 void view_focus(struct infinidesk_view *view);
 
+/* Deactivate all views and clear their keyboard focus. */
+void view_clear_focus(struct infinidesk_server *server);
+
 /*
  * Raise the view to the top of the stack (front of rendering order).
  */
